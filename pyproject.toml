@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "elephantreid"
+version = "0.1.0"
+description = "Elephant re-identification + detection pipeline"
+requires-python = ">=3.10"
+
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-learn",
+    "matplotlib",
+    "seaborn",
+
+    "torch",
+    "torchvision",
+    "torchaudio",
+
+    "opencv-python",
+    "pyyaml",
+    "tqdm",
+    "requests",
+    "pillow",
+
+    "supervision",
+    "thop",
+
+    "ultralytics-yolov5",
+
+    "pytorchwildlife",
+
+    "transformers"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

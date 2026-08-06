@@ -1,0 +1,12 @@
+# ============================================================
+# train_classifiers - Fichier de configuration
+# ============================================================
+version: "v3"
+crop_type: "Head"
+split_file: "v3_Head.ods"
+selection_type: "entry"
+mode: ""
+date: "07_30"
+split_version: "v3" #with crop number included in split
+crop_version: "v2"
+model_name: "ResNet50"

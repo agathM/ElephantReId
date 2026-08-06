@@ -1,0 +1,10 @@
+# ============================================================
+# train_classifiers - Fichier de configuration
+# ============================================================
+
+features_folder: "Left_Ear_entry_07_29_v2"
+crop_file: "split_Left_Ear_entry_07_29_v2.ods"
+crop_type: "Left_Ear"
+selection_type: "entry"
+date: "07_29"
+split_version: "v2"

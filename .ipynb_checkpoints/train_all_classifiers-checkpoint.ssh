@@ -1,0 +1,79 @@
+#!/bin/bash
+
+# HEADER du script :
+
+#SBATCH --job-name=serial_job_test    # Nom du job
+#SBATCH --output=serial_test_%j.log   # Standard output et error log
+
+#SBATCH --partition=gpu_v100
+#SBATCH --gpus=1
+
+#SBATCH --cpus-per-task=1             # Utiliser un seul CPU pour cette tâche (job)
+#SBATCH --mem=6G                   # Mémoire en MB par défaut
+#SBATCH --time=0-02:00:00             # Délai max = 7 jours
+
+#SBATCH --mail-user=<e-mail>          # Où envoyer l'e-mail
+#SBATCH --mail-type=END,FAIL          # Événements déclencheurs (NONE, BEGIN, END, FAIL, ALL)
+
+#SBATCH --licenses=sps                # Déclaration des ressources de stockage et/ou logicielles
+
+# Gestion des erreurs :
+
+set -euxo pipefail
+
+# Commandes à soumettre :
+
+#DEBUG ENVIRONNEMENT
+#nvidia-smi
+#module avail conda
+#module list
+#which python
+#python test/test_torch.py
+
+#python scripts/crops/yolo_head4.py --config config/config_cave2.yaml
+
+#python test_classifier.py
+
+#python /pbs/home/a/ameurisse/ElephantReId/scripts/crops/extract_body_crops.py --input_file data_entry_selection.csv --output_folder #"entry_selection_17_06" 
+
+export PYTHONPATH=/pbs/home/a/ameurisse/ElephantReId/src
+#python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/train_classifier_with_config.py --config "body.yaml"
+#python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/train_classifier_with_config.py --config "head.yaml" 
+#python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/train_classifier_with_config.py --config "left_ear.yaml"
+#python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/train_classifier_with_config.py --config "right_ear.yaml"
+#python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/train_classifier_with_config.py --config "${config}"
+run() {
+    config=$1
+
+    echo "=========================================="
+    echo "Training ${config}"
+    start=$(date +%s)
+    #python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/train_classifier_with_config.py --config "${config}"
+    #python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/confusion.py --config "${config}"
+    #python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/train_metadata.py --config "${config}"
+    python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/grad_cam.py --config "${config}"
+
+    end=$(date +%s)
+    duration=$((end - start))
+
+    printf "Finished %s in %02dh:%02dm:%02ds\n" \
+        "${config}" \
+        $((duration/3600)) \
+        $(((duration%3600)/60)) \
+        $((duration%60))
+    echo "=========================================="
+}
+
+#run v3_Body.yaml
+#run v3_Head.yaml
+#run v3_Left_Ear.yaml
+#run v3_Right_Ear.yaml
+#run v3_Ear.yaml
+
+#run v4_Body.yaml
+#run v4_Head.yaml
+#run v4_Ear.yaml
+
+#run v5_Body.yaml
+run v5_Head.yaml
+#run v5_Ear.yaml

@@ -1,0 +1,11 @@
+README
+pyproject.toml
+src/elephantreid/__init__.py
+src/elephantreid.egg-info/PKG-INFO
+src/elephantreid.egg-info/SOURCES.txt
+src/elephantreid.egg-info/dependency_links.txt
+src/elephantreid.egg-info/requires.txt
+src/elephantreid.egg-info/top_level.txt
+src/elephantreid/identification/__init__.py
+src/elephantreid/identification/data.py
+src/elephantreid/identification/network.py

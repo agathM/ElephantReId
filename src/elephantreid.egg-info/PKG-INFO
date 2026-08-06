@@ -1,0 +1,24 @@
+Metadata-Version: 2.4
+Name: elephantreid
+Version: 0.1.0
+Summary: Elephant re-identification + detection pipeline
+Requires-Python: >=3.10
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: scipy
+Requires-Dist: scikit-learn
+Requires-Dist: matplotlib
+Requires-Dist: seaborn
+Requires-Dist: torch
+Requires-Dist: torchvision
+Requires-Dist: torchaudio
+Requires-Dist: opencv-python
+Requires-Dist: pyyaml
+Requires-Dist: tqdm
+Requires-Dist: requests
+Requires-Dist: pillow
+Requires-Dist: supervision
+Requires-Dist: thop
+Requires-Dist: ultralytics-yolov5
+Requires-Dist: pytorchwildlife
+Requires-Dist: transformers

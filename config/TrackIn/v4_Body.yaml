@@ -1,0 +1,38 @@
+# TracIn-CP configuration
+
+# checkpoints
+n_cp: 10
+start_cp: 0
+end_cp: 49
+
+# Keep only validation crops whose ground-truth individual is in this list.
+# Empty list or null = keep all individuals.
+trackin_individuals:
+  - Ayo
+  - Kenny
+  - Nala
+
+# validation filtering
+conf_thresh: 0.5
+margin_thresh: 0.2
+
+# prediction distribution filtering
+prop_thresh: 0.5
+nb_crop_thresh: 10
+
+# select validation samples
+correct_prediction_only: false
+wrong_prediction_only: true
+
+# aggregate influence by video
+aggregate_by_video: true
+
+# influence
+top_k: 3
+
+# save full influence matrix
+save_influence_matrix: true
+influence_matrix_path: "tracin_influence.pt"
+
+# output
+output_csv: "tracin_results.csv"

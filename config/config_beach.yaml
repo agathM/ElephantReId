@@ -1,0 +1,33 @@
+# ============================================================
+# YOLO_HEAD - Fichier de configuration
+# ============================================================
+
+home_path: "/sps/mnhn/ameurisse/ElephantReId"
+
+model: "/models/head_detection.pt"
+
+# Dossier d'entrée contenant les sous-dossiers par individu
+input: "/data/beach_individuals"
+
+# Dossier de sortie (même organisation que l'entrée)
+output: "/head_crops_cypr_without_tracking"
+
+# --- Inférence ---
+confidence: 0.80        # Seuil de confiance [0.0 - 1.0]
+fps: 2.0                # Frames par seconde à traiter
+
+# --- Tracking ---
+tracking: false          # Activer le tracking
+tracker: "bytetrack.yaml"  # bytetrack.yaml ou botsort.yaml
+
+# --- Crops ---
+save_crops: true        # Sauvegarder les crops des individus trackés
+min_crop_width: 30      # Largeur minimale du crop en pixels
+min_crop_height: 50     # Hauteur minimale du crop en pixels
+
+# --- Vidéo annotée (H.264, sans audio) ---
+save_video: true        # Sauvegarder la vidéo annotée
+show: false             # Afficher en temps réel (désactiver en production)
+
+# --- Bounding Boxes ---
+save_bounding_boxes: true

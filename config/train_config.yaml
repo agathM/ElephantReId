@@ -1,0 +1,14 @@
+# ============================================================
+# train classifier - Fichier de configuration
+# ============================================================
+
+# Chemin vers le modèle YOLO (.pt)
+model: "./models/head_detection.pt"
+
+# Dossier de sortie
+output: "./resultats_classification_training"
+
+# --- Hyperparameters ---
+num_epoch: 10
+batch_size: 42
+lr: 0.0005
