@@ -61,7 +61,7 @@ mode = model_cfg["mode"]
 version = model_cfg["version"]
 
 crop_path = CROP_PATH / crop_type / crop_version
-split_file = CROP_PATH / model_cfg["split_file"]
+split_file = CROP_PATH / "split" / model_cfg["split_file"]
 
 results_folder = RESULTS_PATH / version / crop_type
 model_file = MODEL_PATH / version / crop_type / "model.pth"

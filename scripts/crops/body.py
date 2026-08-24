@@ -34,7 +34,7 @@ if DEVICE == "cuda":
 print(DEVICE)
 file_selection = "entry_selection.ods"
 crops_type = "body"
-crop_selection = "entry_07_30"
+crop_selection = "entry_07_30_beach"
 BODY_PATH = Path("/sps/mnhn/ameurisse/ElephantReId/data/processed/crops") / f"{crops_type}_{crop_selection}.csv"
 TO_CROP_VIDEO_PATH = Path("/sps/mnhn/ameurisse/ElephantReId/data/raw") / file_selection
 Video_PATH = Path("/sps/mnhn/ameurisse/ElephantReId/data/raw/cameras")
@@ -154,7 +154,7 @@ def process_video(
                                 "frame": frame_id,
                                 "track_id": track_id,
                                 "label": "body",
-                                "conf": conf,
+                                "conf": round(conf,2),
                                 "x1": int(round(bbox[0])),
                                 "y1": int(round(bbox[1])),
                                 "x2": int(round(bbox[2])),
@@ -213,7 +213,6 @@ def main():
     for _, row in dt.iterrows():
 
         video = row["video"]
-
         camera = row["camera"]
         indiv = row["indiv_name"]
         mode = row["mode"]
@@ -244,7 +243,6 @@ def main():
         if src is None:
             print(f"Missing video: {video}")
             continue
-
 
 
         df = process_video(

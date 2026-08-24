@@ -22,23 +22,28 @@
 set -euxo pipefail
 
 # Commandes à soumettre :
-
+export PYTHONPATH=/pbs/home/a/ameurisse/ElephantReId/src
 #DEBUG ENVIRONNEMENT
 #nvidia-smi
 #module avail conda
 #module list
 #which python
-#python test/test_torch.py
+#python /pbs/home/a/ameurisse/ElephantReId/test/rename_files.py
 
 #python scripts/crops/yolo_head4.py --config config/config_cave2.yaml
 
 #python test_classifier.py
 
-#python /pbs/home/a/ameurisse/ElephantReId/scripts/crops/extract_body_crops.py
+#python /pbs/home/a/ameurisse/ElephantReId/scripts/crops/body.py
 
 #export PYTHONPATH=/pbs/home/a/ameurisse/ElephantReId/src
 #python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/train_classifier.py
 
 #python /pbs/home/a/ameurisse/ElephantReId/scripts/yolo/train_yolo.py
 #python /pbs/home/a/ameurisse/ElephantReId/scripts/yolo/save_FN_FP.py
-python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/test_yolo.py
+#python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/test_yolo.py
+python /pbs/home/a/ameurisse/ElephantReId/scripts/crops/remove_bg.py
+
+#python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/comp_grad_cam.py \
+#    --config1 v5_Ear.yaml \
+#    --config2 v8_Ear.yaml

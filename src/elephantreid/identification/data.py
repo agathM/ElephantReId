@@ -94,7 +94,9 @@ class CustomImageDataset(Dataset):
             self.df = self.df[self.df['mode']==mode]
         self.df = self.df[
             self.df["split"] == split
-        ].reset_index(drop=True)
+        ]
+        crops = [p.name for p in Path(crop_path).iterdir()]
+        self.df = self.df[self.df['crop_id'].isin(crops)].reset_index(drop=True)
         print(f"#{split} crops by individuals")
         summary = (
             self.df.groupby("indiv_name")
@@ -128,49 +130,73 @@ class CustomImageDataset(Dataset):
             image = self.transform(image)
         return image, label, idx
         
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+
+
 def precompute_features_14th(
-    model: models.ResNet, dataset: torch.utils.data.Dataset, device: torch.device
+    model: models.ResNet,
+    dataset: torch.utils.data.Dataset,
+    device: torch.device
 ) -> torch.utils.data.Dataset:
     """
     Create a new dataset with the features precomputed by the model.
 
-    If the model is f(g(x)) where f is the last layer and g is
-    the rest of the model, it is not necessary to recompute g(x) at
-    each epoch as g is fixed. Hence you can precompute g(x) and
-    create a new dataset
+    The features are extracted from layer3.5.relu and spatially
+    average-pooled to obtain one feature vector per image.
 
-    Arguments:
-    ----------
-    model: models.ResNet
-        The model used to precompute the features
-    dataset: torch.utils.data.Dataset
-        The dataset to precompute the features from
-    device: torch.device
-        The device to use for the computation
-
-    Returns:
-    --------
+    Returns
+    -------
     torch.utils.data.Dataset
-        The new dataset with the features precomputed
+        Dataset containing:
+        - average-pooled features
+        - labels
+        - indices
     """
+
     loader = DataLoader(dataset)
-    model.eval() #no dropout no Batchnorm
-    all_features = [] ; all_labels = [] ; all_idx = []
-    def hook(module,input,output):
-        feat = F.adaptive_max_pool2d(output, (6, 6))
-        feat = feat.flatten(1)
-        feat = feat / (feat.norm(p=2, dim=1, keepdim=True)+1e-12)
-        all_features.append(feat.cpu())
-    handle = model.layer4[0].register_forward_hook(hook)
-    with torch.no_grad(): #no gradients and no graph
+    model.eval()
+
+    all_features = []
+    all_labels = []
+    all_idx = []
+
+    def hook(module, input, output):
+        # output : [B, C, H, W]
+
+        # Average pooling over H and W
+        # [B, C, H, W] -> [B, C, 1, 1]
+        features = F.adaptive_avg_pool2d(output, (1, 1))
+
+        # [B, C, 1, 1] -> [B, C]
+        features = features.flatten(1)
+
+        all_features.append(features)
+
+    handle = model.layer3[5].register_forward_hook(hook)
+
+    with torch.no_grad():
         for images, labels, idx in loader:
             images = images.to(device)
+
             _ = model(images)
-            all_labels.append(labels.cpu())
-            all_idx.append(idx.cpu())
+
+            all_labels.append(labels.to(device))
+            all_idx.append(idx)
+
     handle.remove()
-    all_features = torch.cat(all_features,dim=0) ; all_labels = torch.cat(all_labels,dim=0)
-    data2 = TensorDataset(all_features,all_labels)
+
+    all_features = torch.cat(all_features, dim=0)
+    all_labels = torch.cat(all_labels, dim=0)
+    all_idx = torch.cat(all_idx, dim=0)
+
+    data2 = TensorDataset(
+        all_features,
+        all_labels,
+        all_idx
+    )
+
     return data2
 
 def precompute_features(
@@ -293,13 +319,13 @@ def load_data(model:models.ResNet, input_transform, crop_path: Path, file: str, 
         print("val size:", len(val_data))
         print("classes:", label_map)
 
-        train_features_dataset = precompute_features(
+        train_features_dataset = precompute_features_14th(
             model,
             train_data,
             device=device
         )
 
-        val_features_dataset = precompute_features(
+        val_features_dataset = precompute_features_14th(
             model,
             val_data,
             device=device

@@ -48,10 +48,10 @@ run() {
     echo "=========================================="
     echo "Training ${config}"
     start=$(date +%s)
-    #python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/train_classifier_with_config.py --config "${config}"
-    #python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/confusion.py --config "${config}"
+    python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/train_classifier_with_config.py --config "${config}"
+    python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/confusion.py --config "${config}"
     #python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/train_metadata.py --config "${config}"
-    python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/grad_cam.py --config "${config}"
+    #python /pbs/home/a/ameurisse/ElephantReId/scripts/identification/grad_cam.py --config "${config}"
 
     end=$(date +%s)
     duration=$((end - start))
@@ -74,6 +74,8 @@ run() {
 #run v4_Head.yaml
 #run v4_Ear.yaml
 
-#run v5_Body.yaml
-run v5_Head.yaml
-#run v5_Ear.yaml
+#run v6_Head.yaml
+#run v7_Head.yaml
+#run v8_Head.yaml
+
+run v11_Ear.yaml

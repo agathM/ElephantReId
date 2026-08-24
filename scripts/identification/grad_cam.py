@@ -19,11 +19,12 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 RESULTS_PATH = Path("/sps/mnhn/ameurisse/ElephantReId/data/results/classifiers")
 FEATURES_PATH = Path("/sps/mnhn/ameurisse/ElephantReId/data/processed/precomputed_features")
-CROP_PATH = Path("/sps/mnhn/ameurisse/ElephantReId/data/processed/crops")
+CROP_PATH = Path("/sps/mnhn/ameurisse/ElephantReId/data/processed/crops/classifiers")
 MODEL_PATH = Path("/sps/mnhn/ameurisse/ElephantReId/models/identification")
 CONFIG_PATH = Path("/pbs/home/a/ameurisse/ElephantReId/config/train_classifiers")
+SPACE_TRAIN_BTW_GRAD_CAMS = 3
+VAL_RANDOM_FRAC = 1
 
-model_name = "ResNet50_v3"
 
 normalize = transforms.Normalize(
     mean=[0.485, 0.456, 0.406],
@@ -64,7 +65,7 @@ def main():
     version = cfg["version"]
     
     crop_path = CROP_PATH / crop_type / crop_version
-    split_file = CROP_PATH / cfg["split_file"]
+    split_file = CROP_PATH / "split" / cfg["split_file"]
     
     features_folder = FEATURES_PATH / version / crop_type
     
@@ -125,16 +126,15 @@ def main():
     if mode:
         df = df[df["mode"] == mode].reset_index(drop=True)
 
-    df["crop_path"] = (
-        crop_path
-        / df["crop_id"]
+    df["crop_path"] = df["crop_id"].apply(
+        lambda x: crop_path / str(x)
     )
 
     train_df = df[df["split"] == "train"].copy()
 
     train_df = (
         train_df.groupby("indiv_name", group_keys=False)
-        .apply(lambda g: g.iloc[::5])
+        .apply(lambda g: g.iloc[::SPACE_TRAIN_BTW_GRAD_CAMS])
         .reset_index(drop=True)
     )
 
@@ -172,9 +172,8 @@ def main():
 
     df = pd.read_csv(results_folder / "val_pred_metadata.csv")
 
-    df["crop_path"] = (
-        crop_path
-        / df["crop_id"]
+    df["crop_path"] = df["crop_id"].apply(
+        lambda x: crop_path / str(x)
     )
 
     df["conf_pred_label"] = df["conf_pred_label"].astype(float)
@@ -186,7 +185,7 @@ def main():
             ["indiv_name", "pred_label"],
             group_keys=False,
         )
-        .sample(frac=0.3, random_state=SEED)
+        .sample(frac=VAL_RANDOM_FRAC, random_state=SEED)
         .reset_index(drop=True)
     )
 

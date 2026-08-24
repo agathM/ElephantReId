@@ -61,7 +61,7 @@ def main()->None:
     crop_path = CROP_PATH / crop_type / crop_version
     results_folder = RESULTS_PATH / version / crop_type
     model_path = MODEL_PATH / version / crop_type
-    split_file = CROP_PATH / cfg['split_file']
+    split_file = CROP_PATH / "split" / cfg["split_file"]
     features_folder = FEATURES_PATH / version / crop_type
     os.makedirs(features_folder,exist_ok=True)
     os.makedirs(model_path,exist_ok=True)

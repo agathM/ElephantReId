@@ -57,7 +57,7 @@ def main()->None:
     crop_path = CROP_PATH / crop_type / crop_version
     results_folder = RESULTS_PATH / version / crop_type
     model_path = MODEL_PATH / version / crop_type
-    split_file = CROP_PATH / model_cfg['split_file']
+    split_file = CROP_PATH / "split" / model_cfg["split_file"]
     features_folder = FEATURES_PATH / version / crop_type
     os.makedirs(features_folder,exist_ok=True)
     os.makedirs(model_path,exist_ok=True)
@@ -73,7 +73,7 @@ def main()->None:
     base_model = models.resnet50(weights='DEFAULT')
     #ajouter un block de 3 couches linéaires : tête de classification à entraîner
     classifier_name = "fc"
-    dim_in = 2048
+    dim_in = 1024 #2048 layer 4
     #CHARGEMENT DES DONNEES
     train_features_dataset, val_features_dataset, train_data, val_data,_ = load_data(base_model,input_transform,crop_path, split_file ,crop_type,DEVICE,features_folder,mode)
     class_names = train_data.classes
@@ -99,6 +99,7 @@ def main()->None:
         factor=0.5,
         patience=3
     )
+    res_dict = {'version':version, 'crop_type':crop_type,'mode':mode, 'train size':len(train_data), 'val size':len(val_data)}
     train_error = [] ; val_error =[]
     train_accuracy = [] ; val_accuracy = []
     train_loader = DataLoader(train_features_dataset,shuffle=True,generator=g,batch_size=batch_size)
@@ -124,6 +125,8 @@ def main()->None:
         accuracy = corrects*100/num_train
         train_accuracy.append(accuracy.item())
         if epoch==num_epoch-1:
+            res_dict['Train accuracy'] = round(accuracy.item(),1)
+            res_dict['Train error'] = round(error,2)
             print(f"Train accuracy : {accuracy:.1f}")
             print(f"Train error : {error:.2f}")
         ### VALIDATION 
@@ -142,9 +145,12 @@ def main()->None:
                     
         error /= len(val_loader)
         val_error.append(error)
-        val_accuracy.append(corrects*100/num_val)
+        val_acc = round(corrects*100/num_val,1)
+        val_accuracy.append(val_acc)
         if epoch==num_epoch-1:
-            print(f"Val accuracy : {corrects*100/num_val:.1f}")
+            res_dict['Val accuracy'] = val_acc
+            res_dict['Val error'] = round(error,2)
+            print(f"Val accuracy : {val_acc:.1f}")
             print(f"Val error : {error:.2f}")
         #scheduler for lr
         old_lr = optimizer.param_groups[0]["lr"]
@@ -153,7 +159,11 @@ def main()->None:
     
         # if new_lr != old_lr:
         #     print(f"LR reduced from {old_lr:.2e} to {new_lr:.2e}")
-    
+    #save results
+    res_df = pd.DataFrame([res_dict])
+    train_results = pd.read_csv(RESULTS_PATH / "train_results.csv")
+    train_results = pd.concat([train_results,res_df],ignore_index=True)
+    train_results.to_csv(RESULTS_PATH / "train_results.csv",index=False)
     
     #SAVE TRAINING
     plt.figure(figsize=(4,6))
@@ -193,7 +203,9 @@ def main()->None:
         header=0
     )
     out_df = out_df[out_df['mode']==mode]
-    out_df = out_df[out_df['split']=="val"].reset_index(drop=True)
+    crops = [p.name for p in Path(crop_path).iterdir()]
+    out_df = out_df[out_df['split']=="val"]
+    out_df = out_df[out_df['crop_id'].isin(crops)].reset_index(drop=True)
     # Save logits
     out_df['logits'] = [
         [round(v, 2) for v in x.tolist()]

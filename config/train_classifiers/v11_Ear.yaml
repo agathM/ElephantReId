@@ -1,0 +1,12 @@
+# ============================================================
+# train_classifiers - Fichier de configuration
+# ============================================================
+version: "v11"
+crop_type: "Ear"
+split_file: "v4_Ear.ods"
+mode: "Day"
+selection_type: "entry"
+date: "08_11"
+split_version: "v3" #with crop number included in split
+crop_version: "v3" #cyprien segmentation
+model_name: "ResNet50" #with features from layer3

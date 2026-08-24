@@ -1,0 +1,12 @@
+# ============================================================
+# train_classifiers - Fichier de configuration
+# ============================================================
+version: "v7"
+crop_type: "Ear"
+split_file: "v4_Ear.ods"
+mode: "Night"
+selection_type: "entry"
+date: "08_11"
+split_version: "v3" #with crop number included in split
+crop_version: "v3" # with bg removed
+model_name: "ResNet50"
