@@ -10,7 +10,8 @@ def load_config(config_dir: Path) -> dict:
     config_path = config_dir / "pipeline.yaml"
     with open(config_path, "r", encoding="utf-8") as file:
         return yaml.safe_load(file) or {}
-from scripts.identification import train_classifier
+from scripts.identification import train_classifier, detect_and_track
+
 
 # ============================================================
 # DOSSIER DE RÉSULTATS
@@ -182,7 +183,7 @@ def main(argv: list[str] | None = None) -> None:
     detection['home_dir'] = home_dir
     detection['frame_database'] = frame_database
     detection['video_database'] = config["video_database"]
-    import scripts.identification.detect as detect
+    import scripts.identification.detect_and_track as detect
     detect.main(detection)
 
 if __name__ == "__main__":
