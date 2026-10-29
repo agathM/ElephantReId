@@ -754,6 +754,118 @@ def process_video_crop(
     finally:
         cap.release()
 
+def process_video_megadetector(
+    source_path: Path,
+    video_name: str,
+    detection_model,
+    tracker,
+    target_fps: int = 2,
+):
+    """
+    Process one video using the provided persistent tracker.
+
+    The tracker is passed from the caller so that it can be kept
+    between successive videos.
+    """
+
+    cap = cv2.VideoCapture(str(source_path))
+
+    if not cap.isOpened():
+        print(f"Cannot open {source_path}")
+        return pd.DataFrame()
+
+    source_fps = cap.get(cv2.CAP_PROP_FPS)
+
+    if source_fps <= 0:
+        print(f"Invalid FPS for {source_path}")
+        cap.release()
+        return pd.DataFrame()
+
+    stride = max(
+        1,
+        round(source_fps / target_fps),
+    )
+
+    frame_id = 0
+
+    detections_rows = []
+
+    total_frames = int(
+        cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    )
+
+    pbar = tqdm(
+        total=total_frames,
+        desc=video_name,
+    )
+
+    while True:
+
+        ret, frame = cap.read()
+
+        if not ret:
+            break
+
+        if frame_id % stride == 0:
+
+            results_det = detection_model.single_image_detection(
+                frame,
+                img_path=frame_id,
+            )
+
+            if (
+                results_det is not None
+                and len(results_det["detections"].confidence) > 0
+            ):
+
+                det = results_det["detections"]
+
+                detections = sv.Detections(
+                    xyxy=det.xyxy,
+                    confidence=det.confidence,
+                    class_id=det.class_id,
+                )
+
+                tracked = tracker.update_with_detections(
+                    detections
+                )
+
+                if tracked.tracker_id is not None:
+
+                    for bbox, conf, track_id in zip(
+                        tracked.xyxy,
+                        tracked.confidence,
+                        tracked.tracker_id,
+                    ):
+
+                        track_id = int(track_id)
+                        conf = float(conf)
+
+                        detections_rows.append(
+                            {
+                                "video": video_name,
+                                "frame": frame_id,
+                                "track": track_id,
+                                "label": "body",
+                                "conf": round(conf, 2),
+                                "x1": int(round(bbox[0])),
+                                "y1": int(round(bbox[1])),
+                                "x2": int(round(bbox[2])),
+                                "y2": int(round(bbox[3])),
+                            }
+                        )
+
+        frame_id += 1
+        pbar.update(1)
+
+    pbar.close()
+    cap.release()
+
+    if not detections_rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(detections_rows)
+
 
 # ============================================================
 # Main
