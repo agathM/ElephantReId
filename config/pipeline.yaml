@@ -1,0 +1,90 @@
+# DATABASE AND HOMEPATH
+dataset_date: "21/10/2026"
+video_database: "video_database.csv"
+frame_database: "frame_database.csv" #base de données avec soit indiv unique sur video soit coordonnées de l'oreille identifiée
+home_dir: "/home/agath/Documents/MNHN/code"#"/sps/mnhn/ameurisse/ElephantReId"
+
+#DETECTIONS PARAMETERS
+detection:
+  videos_dir: "data/raw/indiv_videos"
+  model_name: "seg_ears_lr_v2"
+  fps: 2 #frame per second for detection can be changed to take into account the elephant mouvement
+  tracker: "bytetrack.yaml"  # ByteTrack, BoTSORT
+  keep_detections_without_id: True #détection réalisée que sur les frames ou un indiv a été identifié sinon les détections sont sauvegardées pour identification
+  conf: 0.1 #for head detector to change (save with model ?)
+  model_dir: "models/detection"  # dossier des poids des modèles
+  crops_dir: "data/processed/crops"        # dossier des images de crops
+  identification_threshold: 0.8 #portion of segmented ear of individual included in the detection box
+
+#DETECTIONS FILTERING
+filter:
+  script: "scripts/filter_cut.py"
+  params:
+# Example: cut_score: 0.5 -> renvoie un fichier selected_{body_part}_{detection}_{tracker}
+    {}
+
+#TRAIN / VAL SPLIT
+split:
+    method: "all_combinations" #"balance_crop", "balance_event"
+    event: "day"  # video, 5min, 1h, day
+    max_runs: 10 #sélection des runs les plus différents, pour le jour peu de différences, pour le split par évènement bcp plus : faire un premier script pour choisir des runs?
+    train_ratio: 0.75
+    file_dir: "data/processed/crops/split_files"  # table des splits (run, split)
+
+# Image preprocessing
+transform_function: "brightness_normalized" #choose function from src.identification.preprocessing or None
+
+# Data augmentation
+data_augmentation:
+    fold_size: 10 #number of augmentation if metric learning
+    script: null
+    function: "get_augmentation"
+    data_transformation:
+        params:
+            affine:                 #https://docs.pytorch.org/vision/main/generated/torchvision.transforms.RandomAffine.html
+                degrees: 0
+                translate: (0.1,0,1)  # (tx, ty) ou (tx_min, tx_max, ty_min, ty_max)
+                scale: (0.9,1.10)
+            colorjitter:
+                saturation: (0.10,0.50)
+                hue: (0.10,0.50)
+
+# Feature extraction
+# L'extracteur est utilisé pour produire les features envoyées à la tête de
+# classification. Choix : MiewID | MegaDescriptor | ResNet150 | ResNet50
+# `last_layer` : nom logique de la dernière couche AVANT la classification
+#                (le vecteur de features est la sortie de cette couche).
+# `last_frozen_layer` : nom logique de la dernière couche qui reste gelée ;
+#                toutes les couches comprises entre elle et `last_layer` sont
+#                fine-tunées à partir de `defreeze_epoch`.
+#                "none" => fine-tuning complet.
+feature_extractor:
+    name: "ResNet150"  # MiewID, MegaDescriptor, ResNet150
+    last_layer: "fc"              # ResNet150 : entrée de fc (vecteur de features)
+    last_frozen_layer: "layer3"   # layer4 sera fine-tunée (à partir de defreeze_epoch)
+
+training_parameters:
+    batch_size: 64
+    num_epoch: 30
+    lr: 0.001 #0.5 	0.05 	0.005 	0.001 	0.0005 	0.0001 	0.00005
+    pretrained: true
+    aug_epoch: 5      #epoch (1-based) à partir de laquelle l'augmentation est appliquée
+    defreeze_epoch: 10 #epoch after which layers are unfreeze for training feature extractor
+    early_stopping: 1.0 #MIN_ACC_IMPROVEMENTS = [1.0, 2.0, 5.0, 10.0]
+    num_workers: 4
+    seed: 42
+    params: {}
+
+# Classification
+classification_head: "ClassificationHead"
+
+# Execution
+paths:
+  videos: "data/raw/indiv_videos"
+  output: "data/results"
+
+
+scripts:
+  precompute: "scripts/precompute_features.py"
+  train: "scripts/train_classifier.py"
+  evaluate: "scripts/evaluate.py"
