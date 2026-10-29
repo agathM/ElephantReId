@@ -7,9 +7,9 @@ home_dir: "/home/agath/Documents/MNHN/code"#"/sps/mnhn/ameurisse/ElephantReId"
 #DETECTIONS PARAMETERS
 detection:
   videos_dir: "data/raw/indiv_videos"
-  model_name: "head_ears_detect_09_08" #"seg_ears_lr_v2"
+  model_name: "MDV6-yolov10-e" #"head_ears_detect_09_08" "seg_ears_lr_v2"  for megadetector
   fps: 2 #frame per second for detection can be changed to take into account the elephant mouvement
-  tracker: "bytetrack.yaml"  # ByteTrack, BoTSORT
+  tracker: "ByteTrack"  # ByteTrack
   keep_detections_without_id: True #save detection without indiv match from database
   save_videos_with_detections: True #save videos with detections and track ids to annotate detections when several individuals in videos (careful dpn't take into account the body part, I choose ear)
   conf: 0.1 #for head detector to change (save with model ?)

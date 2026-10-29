@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 from ultralytics import YOLO
 from tqdm import tqdm
+import supervision as sv
 import warnings
 import pickle
 import os
@@ -755,116 +756,189 @@ def process_video_crop(
         cap.release()
 
 def process_video_megadetector(
-    source_path: Path,
-    video_name: str,
-    detection_model,
-    tracker,
-    target_fps: int = 2,
+        model,
+        video_path,
+        csv_rows,
+        conf_thresh,
+        tracker,
+        treated_videos,
+        keep_detections_without_id,
+        crops_dir,
+        target_fps,
+        reset_tracker,
+        detections_by_frame=None
 ):
     """
-    Process one video using the provided persistent tracker.
+    Process one video with MegaDetector and an external tracker.
 
-    The tracker is passed from the caller so that it can be kept
-    between successive videos.
+    MegaDetector does not integrate tracking: detections are computed first,
+    then passed to the external tracker (e.g. supervision ByteTrack).
     """
+    if reset_tracker and hasattr(tracker, "reset"):
+        tracker.reset()
 
-    cap = cv2.VideoCapture(str(source_path))
-
-    if not cap.isOpened():
-        print(f"Cannot open {source_path}")
-        return pd.DataFrame()
-
-    source_fps = cap.get(cv2.CAP_PROP_FPS)
-
-    if source_fps <= 0:
-        print(f"Invalid FPS for {source_path}")
-        cap.release()
-        return pd.DataFrame()
-
-    stride = max(
-        1,
-        round(source_fps / target_fps),
+    stride = get_stride(
+        video_path,
+        target_fps
     )
 
-    frame_id = 0
-
-    detections_rows = []
-
-    total_frames = int(
-        cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    cap = cv2.VideoCapture(
+        str(video_path)
     )
 
-    pbar = tqdm(
-        total=total_frames,
-        desc=video_name,
-    )
+    frame_number = 0
 
-    while True:
+    try:
+        while True:
 
-        ret, frame = cap.read()
+            ret, frame = cap.read()
 
-        if not ret:
-            break
+            if not ret:
+                break
 
-        if frame_id % stride == 0:
+            # Run MegaDetector only every stride frames.
+            if frame_number % stride == 0:
 
-            results_det = detection_model.single_image_detection(
-                frame,
-                img_path=frame_id,
-            )
+                last_detections = []
 
-            if (
-                results_det is not None
-                and len(results_det["detections"].confidence) > 0
-            ):
-
-                det = results_det["detections"]
-
-                detections = sv.Detections(
-                    xyxy=det.xyxy,
-                    confidence=det.confidence,
-                    class_id=det.class_id,
+                results_det = model.single_image_detection(
+                    frame,
+                    img_path=frame_number,
                 )
 
-                tracked = tracker.update_with_detections(
-                    detections
-                )
+                if (
+                    results_det is not None
+                    and results_det.get("detections") is not None
+                ):
 
-                if tracked.tracker_id is not None:
+                    det = results_det["detections"]
+                    keep = det.confidence >= conf_thresh
 
-                    for bbox, conf, track_id in zip(
-                        tracked.xyxy,
-                        tracked.confidence,
-                        tracked.tracker_id,
-                    ):
+                    if np.any(keep):
 
-                        track_id = int(track_id)
-                        conf = float(conf)
-
-                        detections_rows.append(
-                            {
-                                "video": video_name,
-                                "frame": frame_id,
-                                "track": track_id,
-                                "label": "body",
-                                "conf": round(conf, 2),
-                                "x1": int(round(bbox[0])),
-                                "y1": int(round(bbox[1])),
-                                "x2": int(round(bbox[2])),
-                                "y2": int(round(bbox[3])),
-                            }
+                        class_id = getattr(det, "class_id", None)
+                        detections = sv.Detections(
+                            xyxy=det.xyxy[keep],
+                            confidence=det.confidence[keep],
+                            class_id=(
+                                class_id[keep]
+                                if class_id is not None
+                                else None
+                            ),
                         )
 
-        frame_id += 1
-        pbar.update(1)
+                        # The tracker is external to MegaDetector.
+                        tracked = tracker.update_with_detections(
+                            detections
+                        )
 
-    pbar.close()
-    cap.release()
+                        if tracked.tracker_id is not None:
 
-    if not detections_rows:
-        return pd.DataFrame()
+                            for bbox, conf, track_id in zip(
+                                tracked.xyxy,
+                                tracked.confidence,
+                                tracked.tracker_id,
+                            ):
 
-    return pd.DataFrame(detections_rows)
+                                track_id = int(track_id)
+
+                                if track_id < 0:
+                                    continue
+
+                                conf = float(conf)
+                                bbox = [float(value) for value in bbox]
+
+                                x1 = int(round(bbox[0]))
+                                y1 = int(round(bbox[1]))
+                                x2 = int(round(bbox[2]))
+                                y2 = int(round(bbox[3]))
+
+                                label = "body"
+
+                                last_detections.append(
+                                    {
+                                        "bbox": bbox,
+                                        "label": label,
+                                        "conf": conf,
+                                        "track_id": track_id,
+                                        "indiv": None,
+                                    }
+                                )
+
+                                image = (
+                                    f"{video_path.stem}"
+                                    f"_fr_"
+                                    f"{int(frame_number):06d}"
+                                    f"_t{track_id}.png"
+                                )
+                                row = {
+                                    "image": image,
+                                    "video":
+                                        video_path.name,
+
+                                    "frame":
+                                        frame_number,
+
+                                    "track_id":
+                                        track_id,
+
+                                    "label":
+                                        label.replace(" ", "_"),
+
+                                    "conf":
+                                        conf,
+
+                                    "x1":
+                                        x1,
+
+                                    "y1":
+                                        y1,
+
+                                    "x2":
+                                        x2,
+
+                                    "y2":
+                                        y2,
+
+                                    "area":
+                                        round(x2 - x1) * round(y2 - y1),
+
+                                    "ratio":
+                                        round(x2 - x1) / max(round(y2 - y1), 1)
+                                }
+                                indiv = get_detection_id(row)
+
+                                crop = frame[y1:y2, x1:x2]
+
+                                if indiv is None:
+                                    treated_videos['some_detect'].add(video_path.name)
+                                    if keep_detections_without_id and crop.size:
+                                        cv2.imwrite(
+                                            crops_dir
+                                            / "unidentified"
+                                            / label.replace(" ", "_")
+                                            / image,
+                                            crop,
+                                        )
+                                elif crop.size:
+                                    cv2.imwrite(
+                                        crops_dir / label.replace(" ", "_") / image,
+                                        crop,
+                                    )
+
+                                row['indiv'] = indiv
+                                last_detections[-1]['indiv'] = indiv
+                                csv_rows.append(row)
+
+                if detections_by_frame is not None:
+                    detections_by_frame[frame_number] = last_detections
+
+            frame_number += 1
+
+        if video_path.name not in treated_videos['some_detect']:
+            treated_videos['all_detect'].add(video_path.name)
+    finally:
+        cap.release()
 
 
 # ============================================================
@@ -879,8 +953,6 @@ def main(metadata:dict):
     frame_database_df = pd.read_csv(frame_database)
     model_name = metadata['model_name']
     crops_dir = home_dir / metadata['crops_dir'] / model_name
-    model_path = home_dir / metadata['model_dir'] / (model_name + ".pt")
-    tracker = metadata['tracker']
     crops_file_path = home_dir / metadata['crops_dir'] / ( model_name + ".csv")
     videos_dir = home_dir / metadata['videos_dir']
     keep_detections_without_id = metadata["keep_detections_without_id"]
@@ -898,21 +970,40 @@ def main(metadata:dict):
     conf = metadata["conf"]
     target_fps = metadata["fps"]
     identification_threshold = metadata["identification_threshold"]
-    detection_task = "detect" if "detect" in model_name else "seg"
     single_indiv_videos_df = pd.read_csv(home_dir / metadata['video_database'])
     single_indiv_videos_df = single_indiv_videos_df[single_indiv_videos_df.several_indivs==False].filter(['indiv','video'])
     single_indiv_videos = {row['video']:row['indiv'] for _,row in single_indiv_videos_df.iterrows()}
 
-    model = YOLO(
-        model_path
-    )
+    if ".pt" not in model_name:
+        from PytorchWildlife.models import detection as pw_detection
+        import supervision as sv
+        detection_task = "megadetector"
+        model = pw_detection.MegaDetectorV6(
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            pretrained=True,
+            version="MDV6-yolov10-e",
+        )
+        tracker = metadata['tracker']
+        if tracker is None or isinstance(tracker, str):
+            tracker = sv.ByteTrack()
 
+        labels = ["body"]
+        print("MegaDetector classes:", getattr(model, "CLASS_NAMES", labels))
+    else:
+        detection_task = "detect" if "detect" in model_name else "seg"
+        model_path = home_dir / metadata['model_dir'] / (model_name + ".pt")
+        model = YOLO(
+            model_path
+        )
+        tracker = metadata['tracker'].lower() + '.yaml'
+        labels = list(model.names.values())
 
-    print(
-        "Classes:",
-        model.names
-    )
-    for label in model.names.values():
+        print(
+            "Classes:",
+            model.names
+        )
+
+    for label in labels:
         os.makedirs(crops_dir / label.replace(" ","_"), exist_ok=True)
         os.makedirs(crops_dir / label.replace(" ","_") / "unidentified", exist_ok=True)
 
@@ -983,7 +1074,7 @@ def main(metadata:dict):
     n_done = 0
     n_failed = []
 
-    for p, reset_tracker in videos_with_reset:
+    for p, reset_tracker in videos_with_reset[:10]:
         rows = []
         detections_by_frame = {}
         args = {"model": model,
@@ -998,18 +1089,16 @@ def main(metadata:dict):
                 "reset_tracker": reset_tracker,
                 "detections_by_frame": detections_by_frame}
         try:
-            if detection_task == "seg":
-                try:
-                    process_video_seg(**args)
-                except TypeError:
-                    args.pop("reset_tracker", None)
-                    process_video_seg(**args)
-            else:
-                try:
-                    process_video_crop(**args)
-                except TypeError:
-                    args.pop("reset_tracker", None)
-                    process_video_crop(**args)
+            process_fn = {
+                "seg": process_video_seg,
+                "detect": process_video_crop,
+                "megadetector": process_video_megadetector,
+            }[detection_task]
+            try:
+                process_fn(**args)
+            except TypeError:
+                args.pop("reset_tracker", None)
+                process_fn(**args)
 
         except Exception as e:
             n_failed.append(p)
