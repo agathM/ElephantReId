@@ -87,7 +87,10 @@ def get_detection_id(row):
     return id
 
 def get_partially_treated_video_to_treat(partially_treated_videos):
-    # Find detections matching the frame_database whose segmentation was not saved
+    """Actualize detection database with indiv from frame database
+    If there exists a detection without image being saved, the video has to be treated again
+    Returns videos already treated that needs to be treated again"""
+
     if not os.path.exists(crops_file_path):
         return partially_treated_videos
     videos_to_treat = set()
@@ -156,6 +159,136 @@ def append_rows(rows):
     )
 
 
+def tracked_video_exists(tracked_videos_dir, video_path):
+    """Return True if a video with the same stem already exists in tracked_videos_dir."""
+    if tracked_videos_dir is None or not Path(tracked_videos_dir).exists():
+        return False
+
+    stem = Path(video_path).stem
+    return any(
+        path.is_file() and path.stem == stem
+        for path in Path(tracked_videos_dir).iterdir()
+    )
+
+
+def _track_color(track_id):
+    """Deterministic BGR color for a given track id."""
+    return (
+        37 * track_id % 256,
+        17 * track_id % 256,
+        29 * track_id % 256,
+    )
+
+
+def draw_tracked_detections(frame, detections):
+    """Draw bounding boxes, track ids and individual ids on a frame."""
+    annotated = frame.copy()
+
+    for detection in detections:
+        bbox = detection.get("bbox")
+        if bbox is None:
+            continue
+
+        x1, y1, x2, y2 = (int(round(value)) for value in bbox)
+        track_id = int(detection.get("track_id", -1))
+        color = _track_color(track_id)
+
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+
+        text = f"{detection.get('label', '')} id:{track_id}"
+        if detection.get("indiv") is not None:
+            text += f" indiv:{detection['indiv']}"
+
+        (text_w, text_h), _ = cv2.getTextSize(
+            text,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            2,
+        )
+        text_top = max(0, y1 - text_h - 5)
+        text_bottom = max(text_h + 5, y1)
+        cv2.rectangle(
+            annotated,
+            (x1, text_top),
+            (x1 + text_w + 5, text_bottom),
+            color,
+            -1,
+        )
+        cv2.putText(
+            annotated,
+            text,
+            (x1 + 2, text_bottom - 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 0),
+            2,
+        )
+
+    return annotated
+
+
+def save_tracked_video(video_path, detections_by_frame, output_path):
+    """Write an annotated copy of a video.
+
+    Detections are stored at inference frames only. The last known detections
+    are reused for frames skipped by the detection stride, so boxes remain
+    visible in the output video.
+    """
+    if not detections_by_frame:
+        return False
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        warnings.warn(f"Cannot open video to save tracked annotations: {video_path}")
+        return False
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    writer = cv2.VideoWriter(
+        str(output_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+    if not writer.isOpened():
+        cap.release()
+        warnings.warn(f"Cannot create tracked video: {output_path}")
+        return False
+
+    detection_frames = sorted(detections_by_frame)
+    detection_index = 0
+    current_detections = []
+    frame_number = 0
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            while (
+                detection_index < len(detection_frames)
+                and detection_frames[detection_index] <= frame_number
+            ):
+                current_detections = detections_by_frame[
+                    detection_frames[detection_index]
+                ]
+                detection_index += 1
+
+            writer.write(draw_tracked_detections(frame, current_detections))
+            frame_number += 1
+    finally:
+        cap.release()
+        writer.release()
+
+    return True
+
+
 # ============================================================
 # Video processing
 # ============================================================
@@ -171,7 +304,8 @@ def process_video_seg(
         keep_detections_without_id,
         crops_dir,
         target_fps,
-        reset_tracker
+        reset_tracker,
+        detections_by_frame=None
 ):
     """
     Process one video.
@@ -180,6 +314,8 @@ def process_video_seg(
 
     All detections are stored in csv_rows, which is filled only for this video:
     the caller is responsible for writing them once the video is done.
+    detections_by_frame, when provided, is filled with the detections used to
+    produce the optional annotated video.
     """
 
     def get_mask_bbox(mask, image_width, image_height, border=BORDER):
@@ -227,8 +363,6 @@ def process_video_seg(
     )
 
     frame_number = 0
-    # # Keep last YOLO detections between inference frames
-    # last_detections = []
 
     try:
         while True:
@@ -338,7 +472,8 @@ def process_video_seg(
                                 "cls": cls,
                                 "label": label,
                                 "conf": conf,
-                                "track_id": track_id
+                                "track_id": track_id,
+                                "indiv": None,
                             }
                         )
 
@@ -424,8 +559,11 @@ def process_video_seg(
                                 crop,
                             )
                         row['indiv'] = indiv
+                        last_detections[-1]['indiv'] = indiv
                         csv_rows.append(row)
 
+                if detections_by_frame is not None:
+                    detections_by_frame[frame_number] = last_detections
 
             frame_number += 1
 
@@ -445,7 +583,8 @@ def process_video_crop(
         keep_detections_without_id,
         crops_dir,
         target_fps,
-        reset_tracker
+        reset_tracker,
+        detections_by_frame=None
 ):
     """
     Process one video.
@@ -454,6 +593,8 @@ def process_video_crop(
 
     All detections are stored in csv_rows, which is filled only for this video:
     the caller is responsible for writing them once the video is done.
+    detections_by_frame, when provided, is filled with the detections used to
+    produce the optional annotated video.
     """
     if reset_tracker:
         model.predictor = None
@@ -542,7 +683,8 @@ def process_video_crop(
                                 "cls": cls,
                                 "label": label,
                                 "conf": conf,
-                                "track_id": track_id
+                                "track_id": track_id,
+                                "indiv": None,
                             }
                         )
 
@@ -599,7 +741,11 @@ def process_video_crop(
                         else:
                             cv2.imwrite(crops_dir / label.replace(" ", "_") / image, frame[y1:y2, x1:x2])
                         row['indiv'] = indiv
+                        last_detections[-1]['indiv'] = indiv
                         csv_rows.append(row)
+
+                if detections_by_frame is not None:
+                    detections_by_frame[frame_number] = last_detections
 
             frame_number += 1
 
@@ -615,7 +761,7 @@ def process_video_crop(
 
 
 def main(metadata:dict):
-    global frame_database_df, crops_dir, crops_file_path, identification_threshold, single_indiv_videos
+    global frame_database_df, crops_dir, crops_file_path, identification_threshold, single_indiv_videos, save_videos_with_detections, tracked_videos_dir
     home_dir = Path(metadata['home_dir'])
     frame_database = home_dir / metadata['frame_database']
     frame_database_df = pd.read_csv(frame_database)
@@ -626,6 +772,17 @@ def main(metadata:dict):
     crops_file_path = home_dir / metadata['crops_dir'] / ( model_name + ".csv")
     videos_dir = home_dir / metadata['videos_dir']
     keep_detections_without_id = metadata["keep_detections_without_id"]
+    save_videos_with_detections = metadata["save_videos_with_detections"]
+    tracked_videos_dir = None
+    if save_videos_with_detections:
+        tracked_videos_rel = metadata['tracked_videos_dir']
+        if tracked_videos_rel is None:
+            raise KeyError(
+                "save_videos_with_detections is True but neither "
+                "'tracked_videos_dir' nor 'tracked_videos' is configured"
+            )
+        tracked_videos_dir = home_dir / tracked_videos_rel
+        tracked_videos_dir.mkdir(parents=True, exist_ok=True)
     conf = metadata["conf"]
     target_fps = metadata["fps"]
     identification_threshold = metadata["identification_threshold"]
@@ -692,7 +849,6 @@ def main(metadata:dict):
         f"{len(treated_videos['all_detect'].union(treated_videos['some_detect']))} treated, "
         f"{len(videos_to_treat)} to treat"
     )
-
     # Sort by camera then time
     items = []
     for p in videos_to_treat:
@@ -715,9 +871,9 @@ def main(metadata:dict):
     n_done = 0
     n_failed = []
 
-    for p, reset_tracker in videos_with_reset[:10]:
-
+    for p, reset_tracker in videos_with_reset:
         rows = []
+        detections_by_frame = {}
         args = {"model": model,
                 "video_path": videos_dir / p,
                 "csv_rows": rows,
@@ -727,7 +883,8 @@ def main(metadata:dict):
                 "keep_detections_without_id": keep_detections_without_id,
                 "crops_dir": crops_dir,
                 "target_fps": target_fps,
-                "reset_tracker": reset_tracker}
+                "reset_tracker": reset_tracker,
+                "detections_by_frame": detections_by_frame}
         try:
             if detection_task == "seg":
                 try:
@@ -751,6 +908,22 @@ def main(metadata:dict):
             continue
 
         append_rows(rows)
+
+        # Save an annotated copy only when the video contains at least one
+        # detection without an individual id and has not been saved yet.
+        if (
+            save_videos_with_detections
+            and p in treated_videos['some_detect']
+            and not tracked_video_exists(tracked_videos_dir, p)
+        ):
+            output_path = tracked_videos_dir / f"{Path(p).stem}.mp4"
+            if save_tracked_video(
+                videos_dir / p,
+                detections_by_frame,
+                output_path,
+            ):
+                print(f"[VIDEO] annotations enregistrees : {output_path}")
+
         with open(treated_path, "wb") as f:
             pickle.dump(treated_videos,f)
         n_done += 1
