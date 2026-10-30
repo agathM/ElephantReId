@@ -677,6 +677,8 @@ def process_video_crop(
                             continue  # if box not link to id ignore
 
                         label = model.names[cls]
+                        if label not in labels:
+                            continue
 
                         last_detections.append(
                             {
@@ -947,7 +949,8 @@ def process_video_megadetector(
 
 
 def main(metadata:dict):
-    global frame_database_df, crops_dir, crops_file_path, identification_threshold, single_indiv_videos, save_videos_with_detections, tracked_videos_dir
+    global frame_database_df, crops_dir, crops_file_path, identification_threshold, single_indiv_videos, \
+        save_videos_with_detections, tracked_videos_dir, labels_to_keep
     home_dir = Path(metadata['home_dir'])
     frame_database = home_dir / metadata['frame_database']
     frame_database_df = pd.read_csv(frame_database)
@@ -957,6 +960,7 @@ def main(metadata:dict):
     videos_dir = home_dir / metadata['videos_dir']
     keep_detections_without_id = metadata["keep_detections_without_id"]
     save_videos_with_detections = metadata["save_videos_with_detections"]
+    labels_to_keep = metadata["labels_to_keep"]
     tracked_videos_dir = None
     if save_videos_with_detections:
         tracked_videos_rel = metadata['tracked_videos_dir']
@@ -983,15 +987,15 @@ def main(metadata:dict):
             pretrained=True,
             version="MDV6-yolov10-e",
         )
+        model.predictor.args.verbose = False
         tracker = metadata['tracker']
         if tracker is None or isinstance(tracker, str):
             tracker = sv.ByteTrack()
-
         labels = ["body"]
         print("MegaDetector classes:", getattr(model, "CLASS_NAMES", labels))
     else:
         detection_task = "detect" if "detect" in model_name else "seg"
-        model_path = home_dir / metadata['model_dir'] / (model_name + ".pt")
+        model_path = home_dir / metadata['model_dir'] / model_name
         model = YOLO(
             model_path
         )
@@ -1002,10 +1006,15 @@ def main(metadata:dict):
             "Classes:",
             model.names
         )
+    for i in range(len(labels)):
+        label = labels[i]
+        for l in labels_to_keep:
+            if l in label:
+                os.makedirs(crops_dir / label.replace(" ","_"), exist_ok=True)
+                os.makedirs(crops_dir / label.replace(" ","_") / "unidentified", exist_ok=True)
+            else:
+                labels.pop(i)
 
-    for label in labels:
-        os.makedirs(crops_dir / label.replace(" ","_"), exist_ok=True)
-        os.makedirs(crops_dir / label.replace(" ","_") / "unidentified", exist_ok=True)
 
     # Load camera/time maps
     video_to_camera, video_to_time = {}, {}
@@ -1074,7 +1083,7 @@ def main(metadata:dict):
     n_done = 0
     n_failed = []
 
-    for p, reset_tracker in videos_with_reset[:10]:
+    for p, reset_tracker in videos_with_reset[:1]:
         rows = []
         detections_by_frame = {}
         args = {"model": model,

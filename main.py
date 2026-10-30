@@ -1,4 +1,20 @@
 from __future__ import annotations
+#DETECTION CHOICES
+DETECT_CHOICES = ['ear seg','body detect'] #tuple (body part among body, head, ear)
+
+#DEFAULT PARAMETERS FOR CHOICES
+DETECT_PARAMS = {}
+for choice in DETECT_CHOICES:
+    if choice in ['ear detect','head detect']:
+        label = choice.split(' ')[0]
+        DETECT_PARAMS.setdefault("head_ears_detect_09_08.pt",{"conf":0.1, 'labels_to_keep':[label]})['labels_to_keep'].append(label)
+    elif choice =="body detect":
+        DETECT_PARAMS["MDV6-yolov10-e"] ={"conf":0.1,'labels_to_keep':["body"]}
+    elif choice =="ear seg":
+        DETECT_PARAMS["seg_ears_lr_v2.pt"] = {"conf":0.1,'labels_to_keep':["ear"]}
+
+
+
 
 import argparse
 import shutil
@@ -178,13 +194,20 @@ def main(argv: list[str] | None = None) -> None:
     for path in copied:
         print(f"  - {path.name}")
 
-    # DETECTION
+    # DETECTIONS
     detection = config['detection']
     detection['home_dir'] = home_dir
     detection['frame_database'] = frame_database
     detection['video_database'] = config["video_database"]
+    print("Detections")
     import scripts.identification.detect_and_track as detect
-    detect.main(detection)
+    for model in DETECT_PARAMS:
+        detection['model_name'] = model
+        detection['conf'] = DETECT_PARAMS[model]["conf"]
+        detection['labels_to_keep'] = DETECT_PARAMS[model]["labels_to_keep"]
+        print(f"Model : {model}")
+        print(f"Labels : {detection['labels_to_keep']}")
+        detect.main(detection)
 
 if __name__ == "__main__":
     main()
