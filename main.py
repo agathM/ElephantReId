@@ -33,7 +33,7 @@ def load_config(config_dir: Path) -> dict:
     config_path = config_dir / "pipeline.yaml"
     with open(config_path, "r", encoding="utf-8") as file:
         return yaml.safe_load(file) or {}
-from scripts.identification import train_classifier, detect_and_track
+from scripts.identification import detect_and_track#, train_classifier
 
 
 # ============================================================

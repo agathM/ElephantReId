@@ -2,9 +2,7 @@
 dataset_date: "21/10/2026"
 video_database: "video_database.csv"
 frame_database: "frame_database.csv" #base de données avec soit indiv unique sur video soit coordonnées de l'oreille identifiée
-home_dir: "/home/agath/Documents/MNHN/code"#"/sps/mnhn/ameurisse/ElephantReId"
-crops_dir: "data/processed/crops"        # dossier des images de crops
-split_dir: "data/processed/crops/split_files"  # table des splits (run, split)
+home_dir: "/sps/mnhn/ameurisse/ElephantReId" #"/home/agath/Documents/MNHN/code"
 
 #DETECTIONS PARAMETERS
 detection:
