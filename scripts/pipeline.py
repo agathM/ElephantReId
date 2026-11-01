@@ -369,7 +369,7 @@ def main(argv: list[str] | None = None) -> None:
     detection['home_dir'] = home_dir
     detection['frame_database'] = frame_database
     detection['video_database'] = config["video_database"]
-    import scripts.identification.detect as detect
+    import scripts.identification.detect_and_track as detect
     detect.main(detection)
 
     if not os.path.exists(split_file):

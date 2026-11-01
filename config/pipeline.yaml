@@ -3,35 +3,63 @@ dataset_date: "21/10/2026"
 video_database: "video_database.csv"
 frame_database: "frame_database.csv" #base de données avec soit indiv unique sur video soit coordonnées de l'oreille identifiée
 home_dir: "/home/agath/Documents/MNHN/code"#"/sps/mnhn/ameurisse/ElephantReId"
+crops_dir: "data/processed/crops"        # dossier des images de crops
+split_dir: "data/processed/crops/split_files"  # table des splits (run, split)
 
 #DETECTIONS PARAMETERS
 detection:
   videos_dir: "data/raw/indiv_videos"
-  model_name: "MDV6-yolov10-e" #"head_ears_detect_09_08" "seg_ears_lr_v2"  for megadetector
+  images_dir: "data/raw/"
+#  model_name: "MDV6-yolov10-e" #"head_ears_detect_09_08" "seg_ears_lr_v2"  for megadetector
+#  body_part_task: #ear head body and seg detect
+#    - "ear seg"
+#    - "head detect"
   fps: 2 #frame per second for detection can be changed to take into account the elephant mouvement
-  tracker: "ByteTrack"  # ByteTrack
-  keep_detections_without_id: True #save detection without indiv match from database
-  save_videos_with_detections: True #save videos with detections and track ids to annotate detections when several individuals in videos (careful dpn't take into account the body part, I choose ear)
+  tracker:  "ByteTrack"  # ByteTrack
+  keep_detections_without_id: False #save detection without indiv match from database
+  save_videos_with_detections: False #save videos with detections and track ids to annotate detections when several individuals in videos (careful dpn't take into account the body part, I choose ear)
   conf: 0.1 #for head detector to change (save with model ?)
   model_dir: "models/detection"  # dossier des poids des modèles
-  crops_dir: "data/processed/crops"        # dossier des images de crops
   tracked_videos_dir: "data/processed/tracked_videos"
   identification_threshold: 0.8 #portion of segmented ear of individual included in the detection box
 
 #DETECTIONS FILTERING
 filter:
-  script: "scripts/filter_cut.py"
-  params:
-# Example: cut_score: 0.5 -> renvoie un fichier selected_{body_part}_{detection}_{tracker}
-    {}
+  head_detect:
+    conf: 0.1
+    min_area: 10000
+    min_ratio: None
+    max_ratio: None
+    script:
+      -
+  ear_detect:
+    conf: 0.1
+    min_area: 10000
+    min_ratio: None
+    max_ratio: None
+    script:
+      -
+  body_detect:
+    conf: 0.1
+    min_area: 10000
+    min_ratio: None
+    max_ratio: None
+    script:
+      -
+  ear_seg:
+    conf: 0.1
+    min_area: 10000
+    min_ratio: None
+    max_ratio: 2.7
+    script:
+    - "seg_cut"
 
 #TRAIN / VAL SPLIT
 split:
-    method: "all_combinations" #"balance_crop", "balance_event"
     event: "day"  # video, 5min, 1h, day
     max_runs: 10 #sélection des runs les plus différents, pour le jour peu de différences, pour le split par évènement bcp plus : faire un premier script pour choisir des runs?
     train_ratio: 0.75
-    file_dir: "data/processed/crops/split_files"  # table des splits (run, split)
+    min_crop_per_indiv_for_val: 10
 
 # Image preprocessing
 transform_function: "brightness_normalized" #choose function from src.identification.preprocessing or None

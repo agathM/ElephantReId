@@ -23,6 +23,7 @@ import pickle
 import os
 import torch
 from datetime import datetime
+import pdb
 
 DEVICE = 0 if torch.cuda.is_available() else "cpu"
 
@@ -950,7 +951,7 @@ def process_video_megadetector(
 
 def main(metadata:dict):
     global frame_database_df, crops_dir, crops_file_path, identification_threshold, single_indiv_videos, \
-        save_videos_with_detections, tracked_videos_dir, labels_to_keep
+        save_videos_with_detections, tracked_videos_dir, labels
     home_dir = Path(metadata['home_dir'])
     frame_database = home_dir / metadata['frame_database']
     frame_database_df = pd.read_csv(frame_database)
@@ -977,25 +978,24 @@ def main(metadata:dict):
     single_indiv_videos_df = pd.read_csv(home_dir / metadata['video_database'])
     single_indiv_videos_df = single_indiv_videos_df[single_indiv_videos_df.several_indivs==False].filter(['indiv','video'])
     single_indiv_videos = {row['video']:row['indiv'] for _,row in single_indiv_videos_df.iterrows()}
-
-    if ".pt" not in model_name:
+    model_path = home_dir / metadata['model_dir'] / (model_name + '.pt')
+    if  not os.path.exists(model_path):
         from PytorchWildlife.models import detection as pw_detection
         import supervision as sv
         detection_task = "megadetector"
         model = pw_detection.MegaDetectorV6(
             device="cuda" if torch.cuda.is_available() else "cpu",
             pretrained=True,
-            version="MDV6-yolov10-e",
+            version=model_name,
         )
         model.predictor.args.verbose = False
         tracker = metadata['tracker']
         if tracker is None or isinstance(tracker, str):
             tracker = sv.ByteTrack()
-        labels = ["body"]
+        labels = ["body_detect"]
         print("MegaDetector classes:", getattr(model, "CLASS_NAMES", labels))
     else:
         detection_task = "detect" if "detect" in model_name else "seg"
-        model_path = home_dir / metadata['model_dir'] / model_name
         model = YOLO(
             model_path
         )
@@ -1006,14 +1006,15 @@ def main(metadata:dict):
             "Classes:",
             model.names
         )
+    labels2 = []
     for i in range(len(labels)):
         label = labels[i]
-        for l in labels_to_keep:
-            if l in label:
+        for label_to_keep in labels_to_keep:
+            if label_to_keep in label:
                 os.makedirs(crops_dir / label.replace(" ","_"), exist_ok=True)
                 os.makedirs(crops_dir / label.replace(" ","_") / "unidentified", exist_ok=True)
-            else:
-                labels.pop(i)
+                labels2.append(label)
+    labels = labels2
 
 
     # Load camera/time maps
@@ -1083,7 +1084,7 @@ def main(metadata:dict):
     n_done = 0
     n_failed = []
 
-    for p, reset_tracker in videos_with_reset[:1]:
+    for p, reset_tracker in videos_with_reset:
         rows = []
         detections_by_frame = {}
         args = {"model": model,
@@ -1126,7 +1127,7 @@ def main(metadata:dict):
             and p in treated_videos['some_detect']
             and not tracked_video_exists(tracked_videos_dir, p)
         ):
-            output_path = tracked_videos_dir / f"{Path(p).stem}.mp4"
+            output_path = tracked_videos_dir / model_name / f"{Path(p).stem}.mp4"
             if save_tracked_video(
                 videos_dir / p,
                 detections_by_frame,
@@ -1163,6 +1164,8 @@ def main(metadata:dict):
         )
 
         print(video_count_by_label)
+        return crops_file_path
     else:
         print('No detections')
+        return None
 

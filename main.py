@@ -1,17 +1,22 @@
 from __future__ import annotations
+
+from IPython.core.magics import script
+
 #DETECTION CHOICES
-DETECT_CHOICES = ['ear seg','body detect'] #tuple (body part among body, head, ear)
+DETECT_CHOICES = ['ear_seg','head_detect','ear detect'] #
 
 #DEFAULT PARAMETERS FOR CHOICES
 DETECT_PARAMS = {}
 for choice in DETECT_CHOICES:
-    if choice in ['ear detect','head detect']:
-        label = choice.split(' ')[0]
-        DETECT_PARAMS.setdefault("head_ears_detect_09_08.pt",{"conf":0.1, 'labels_to_keep':[label]})['labels_to_keep'].append(label)
-    elif choice =="body detect":
-        DETECT_PARAMS["MDV6-yolov10-e"] ={"conf":0.1,'labels_to_keep':["body"]}
-    elif choice =="ear seg":
-        DETECT_PARAMS["seg_ears_lr_v2.pt"] = {"conf":0.1,'labels_to_keep':["ear"]}
+    if choice in ['ear_detect','head_detect']:
+        DETECT_PARAMS.setdefault("head_ears_detect_09_08",{"conf":0.1,
+                                                              'labels_to_keep':[choice]
+                                                              })['labels_to_keep'].append(choice)
+    elif choice =="body_detect":
+        DETECT_PARAMS["MDV6-yolov10-e"] ={"conf":0.1,'labels_to_keep':[choice]}
+    elif choice =="ear_seg":
+        DETECT_PARAMS["seg_ears_lr_v2"] = {"conf":0.1,'labels_to_keep':[choice]}
+
 
 
 
@@ -19,6 +24,8 @@ for choice in DETECT_CHOICES:
 import argparse
 import shutil
 from pathlib import Path
+import importlib
+import pandas as pd
 
 import yaml
 def load_config(config_dir: Path) -> dict:
@@ -193,9 +200,10 @@ def main(argv: list[str] | None = None) -> None:
     copied = copy_config_files(config_dir, config, results_dir)
     for path in copied:
         print(f"  - {path.name}")
-
+    crops_dir = Path(config["home_dir"]) / config["crops_dir"]
     # DETECTIONS
-    detection = config['detection']
+    detection = config["detection"]
+    detection['crops_dir'] = config["crops_dir"]
     detection['home_dir'] = home_dir
     detection['frame_database'] = frame_database
     detection['video_database'] = config["video_database"]
@@ -208,6 +216,50 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Model : {model}")
         print(f"Labels : {detection['labels_to_keep']}")
         detect.main(detection)
+
+    # DETECTIONS FILTERING
+    # FIRST CONFIDENCE SCORE AND AREA, THEN SCRIPTS FOR COMPLEX FILTERS
+    selected_dfs = {}
+    filters = config['filter']
+    for model in DETECT_PARAMS:
+        for label in DETECT_PARAMS[model]["labels_to_keep"]:
+            filter = filters[label]
+            conf = filter["conf"]
+            min_area = filter["min_area"]
+            min_ratio = filter["min_ratio"]
+            max_ratio = filter["max_ratio"]
+            crops_file = crops_dir / f"{model.split(".")[0]}.csv"
+            df = pd.read_csv(crops_file)
+            df = df[(df.conf>=conf) & (df.area>=min_area)]
+            if min_ratio:
+                df = df[df.ratio>=min_ratio]
+            if max_ratio:
+                df = df[df.ratio<=max_ratio]
+            selected_dfs[label] = df
+            script_names = filter["script"]
+            if script_names:
+                for script_name in script_names:
+                    if script_name:
+                        filter_script = importlib.import_module(
+                        f"scripts.identification.detection_filters.{script_name}"
+                        )
+                        selected_dfs[label] = filter_script.main(selected_dfs[label],crops_dir,model)
+    #SPLIT DETECTIONS
+    split_config = config["split"]
+    split_config["video_database"] = Path(config["home_dir"]) / config["video_database"]
+    import scripts.identification.split as split
+    for label in selected_dfs:
+        split_config['images_df'] = selected_dfs[label]
+        splits_df, images_df = split.main(split_config)
+        splits_df.to_csv(results_dir / "input" / f"split_{label}.csv")
+        splits_df.to_csv(results_dir / "input" / f"selected_images_{label}.csv")
+        print(splits_df.head())
+        print(images_df.head())
+
+
+
+
+
 
 if __name__ == "__main__":
     main()
