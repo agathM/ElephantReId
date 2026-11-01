@@ -3,12 +3,12 @@ from pathlib import Path
 
 OUTPUT_ROOT = Path(
     "/sps/mnhn/ameurisse/ElephantReId/data/processed/"
-    "crops/classifiers/Head/v3"
+    "crops/classifiers/Ear/v4"
 )
 
 SOURCE_ROOT = Path(
     "/sps/mnhn/ameurisse/ElephantReId/data/processed/"
-    "crops/classifiers/Head/v2"
+    "crops/classifiers/Ear/v2"
 )
 
 

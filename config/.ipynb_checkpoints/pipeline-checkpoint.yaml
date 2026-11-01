@@ -1,0 +1,69 @@
+# config.yaml
+dataset_date: "21/10/2026"
+database_file: "" #base de données avec soit indiv unique sur video soit coordonnées de l'oreille identifiée
+home_path: "/sps/mnhn/ameurisse/ElephantReId"
+# Data preparation
+
+
+detection_model: "" #f"{body_part}_{detection_type}_{date}" sans extension
+tracker: "ByteTrack"  # ByteTrack, BoTSORT
+
+filter:
+script: "scripts/filter_cut.py"
+params:
+# Example: cut_score: 0.5 -> renvoie un fichier selected_{body_part}_{detection}_{tracker}
+{}
+
+split:
+script: "scripts/create_split.py"
+split_method: "day"  # video, 5min, 1h, day
+train_ratio: 0.8
+params: {}
+
+# Image preprocessing
+transform_function: "brightness_normalized" #choose function from src.identification.preprocessing or None
+params: {}
+
+# Data augmentation
+data_augmentation: 
+fold_size: 10 #number of augmentation if metric learning
+script: null
+function: "get_augmentation"
+data_transformation:
+    params: 
+        affine:                 #https://docs.pytorch.org/vision/main/generated/torchvision.transforms.RandomAffine.html
+            degrees: 0
+            translate: (0.1,0,1)
+            scale: (0.9,1.10)
+        colorjittering:        #https://docs.pytorch.org/vision/main/generated/torchvision.transforms.v2.ColorJitter.html#torchvision.transforms.v2.ColorJitter
+            saturation: (0.10,0.50)
+            hue: (0.10,0.50)
+
+# Feature extraction
+
+architecture: "ResNet50.yaml"  # MiewID, MegaDescriptor, ResNet150
+
+training_parameters:
+    batch_size: 64
+    num_epoch: 30
+    lr: 0.001
+    pretrained: true
+    defreeze_epoch: 10 #epoch after which layers are unfreeze for training feature extractor
+    early_stopping: 1.0 #MIN_ACC_IMPROVEMENTS = [1.0, 2.0, 5.0, 10.0]
+    params: {}
+
+# Classification
+classification_head: SVM.yaml      
+
+# Execution
+
+paths:
+input: "data/crops"
+output: "results"
+
+scripts:
+precompute: "scripts/precompute_features.py"
+train: "scripts/train_classifier.py"
+evaluate: "scripts/evaluate.py"
+
+

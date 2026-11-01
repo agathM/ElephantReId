@@ -624,7 +624,7 @@ def main() -> None:
             # MobileSAM avec BODY bbox
             # puis intersection avec HEAD bbox
             # ========================================================
-            
+            frame = 
             body_mask = segment_elephant(
                 frame,
                 body_box[0],

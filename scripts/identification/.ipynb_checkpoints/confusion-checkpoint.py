@@ -574,11 +574,12 @@ cm = confusion_matrix(
     y_pred=predicted.numpy(),
     labels=np.arange(len(class_names))
 )
-np.savez(
-    f"{version}_{crop_type}_confusion.npz",
-    cm=cm,
-    class_names=np.array(class_names),
-)
+
+# np.savez(
+#     f"{version}_{crop_type}_confusion.npz",
+#     cm=cm,
+#     class_names=np.array(class_names),
+# )
 
 # ============================================================
 # Save result

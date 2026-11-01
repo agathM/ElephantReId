@@ -6,15 +6,15 @@
 from ultralytics import YOLO
 import os
 
-YOLO_PATH = "/sps/mnhn/ameurisse/ElephantReId/data/processed/crops/yolo"
-RESULTS_PATH = "/sps/mnhn/ameurisse/ElephantReId/data/results/yolo"
+YOLO_PATH = "/sps/mnhn/ameurisse/ElephantReId/data/processed/crops/yolo_final_new_split"
+RESULTS_PATH = "/sps/mnhn/ameurisse/ElephantReId/data/results/yolo_final_new_split"
 SEED = 42
 model = YOLO("yolo26n.pt")
 
 results = model.train(
     data=os.path.join(YOLO_PATH, "data.yaml"),
     project=RESULTS_PATH,
-    name="v4",
+    name="v1",
     pretrained=True,
     seed=SEED,
 

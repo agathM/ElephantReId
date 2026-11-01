@@ -1,0 +1,1 @@
+conda env remove env -n env_name

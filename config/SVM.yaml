@@ -1,0 +1,4 @@
+#SVM hyperparameters
+params:
+    C: 1.0
+    kernel: "linear"

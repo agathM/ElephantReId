@@ -1,0 +1,3 @@
+# Features parameters
+last_layer: #dans forward hook prend le output de cette layer
+last_frozen_layer: "" #name of the last frozen layer : after layers are finetuned (dans forward hook prend le output de cette layer)

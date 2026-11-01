@@ -1,58 +1,185 @@
-"""
-Track MegaDetector detections over videos.
+# Summary:
+# Run MegaDetector on videos ordered by camera and creation time,
+# while keeping ByteTrack persistent across successive videos
+# separated by less than one minute.
+#if successive_videos, same track id accross videos means same individual but different track id does not mean different indivs, to test
 
-The script:
-- Runs MegaDetector on frames sampled at the target FPS.
-- Converts detections to Supervision format.
-- Uses ByteTrack to assign persistent track IDs.
-- Computes the sum of confidence scores for each track.
-- Keeps only the track with the highest accumulated confidence.
-- Saves the selected track detections into a CSV file.
-"""
+import subprocess
+from datetime import datetime
+from pathlib import Path
 
-
-import os
-import numpy as np
+import cv2
+import pandas as pd
 import supervision as sv
 import torch
-from PytorchWildlife.models import detection as pw_detection
-from PytorchWildlife import utils as pw_utils
-from PIL import Image
-import matplotlib.pyplot as plt
 from tqdm import tqdm
-import cv2
-from typing import Callable
-from supervision import VideoInfo, VideoSink
-from pathlib import Path
-import argparse
-import pandas as pd
+from PytorchWildlife.models import detection as pw_detection
+from trackers import BoTSORTTracker
 
+
+# ============================================================
 # PARAMETERS
+# ============================================================
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 if DEVICE == "cuda":
     torch.cuda.set_device(0)
-print(DEVICE)
-file_selection = "entry_selection.ods"
-crops_type = "body"
-crop_selection = "entry_07_30_beach"
-BODY_PATH = Path("/sps/mnhn/ameurisse/ElephantReId/data/processed/crops") / f"{crops_type}_{crop_selection}.csv"
-TO_CROP_VIDEO_PATH = Path("/sps/mnhn/ameurisse/ElephantReId/data/raw") / file_selection
-Video_PATH = Path("/sps/mnhn/ameurisse/ElephantReId/data/raw/cameras")
-VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv'}
 
-# Initializing the MegaDetectorV6 model for image detection
-# Valid versions are MDV6-yolov9-c, MDV6-yolov9-e, MDV6-yolov10-c, MDV6-yolov10-e or MDV6-rtdetr-c
-detection_model = pw_detection.MegaDetectorV6(device=DEVICE, pretrained=True, version="MDV6-yolov10-e")
-#classifier = SpeciesNetClassifier(model_name="models/classification",device="cpu")
+print(f"Device: {DEVICE}")
+
+VIDEO_PATH = Path(
+    "/sps/mnhn/ameurisse/ElephantReId/data/raw/wcf"
+)
+
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".MP4", ".AVI"}
+
+TARGET_FPS = 2
+
+# Maximum gap between two videos for the tracker to be kept
+MAX_VIDEO_GAP_SECONDS = 60
+CSV_PATH = Path(
+    "/sps/mnhn/ameurisse/ElephantReId/data/processed/crops"
+) / f"wcf_body{MAX_VIDEO_GAP_SECONDS}.csv"
+
+test_videos = ['SEB_126056', 'SEB_126057', 'SEB_126058', 'SEB_126059', 'SEB_126060', 'SEB_126061']
+# ============================================================
+# MEGADETECTOR
+# ============================================================
+
+detection_model = pw_detection.MegaDetectorV6(
+    device=DEVICE,
+    pretrained=True,
+    version="MDV6-yolov10-e"
+)
 
 
+# ============================================================
+# VIDEO METADATA
+# ============================================================
+
+def get_creation_time(src: Path):
+    """Return the video creation time as a timezone-aware UTC datetime."""
+
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format_tags=creation_time",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(src),
+    ]
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    creation_time = result.stdout.strip()
+
+    if not creation_time:
+        return None
+
+    # Parse the timestamp and normalize it to UTC.
+    dt = pd.to_datetime(
+        creation_time,
+        utc=True,
+        errors="coerce",
+    )
+
+    if pd.isna(dt):
+        print(
+            f"Warning: could not parse creation_time "
+            f"for {src}: {creation_time}"
+        )
+        return None
+
+    return dt
+
+
+def get_camera(src: Path, video_root: Path):
+    """
+    Return the camera name from the directory structure.
+
+    Expected structure:
+        VIDEO_PATH / camera / individual / mode / video
+
+    The camera is therefore the first path component relative
+    to VIDEO_PATH.
+    """
+
+    relative_path = src.relative_to(video_root)
+
+    return relative_path.parts[0]
+
+
+def get_video_metadata(video_root: Path):
+    """
+    Find all videos and retrieve their camera and creation time.
+    """
+
+    rows = []
+
+    for src in video_root.rglob("*"):
+
+        if src.suffix not in VIDEO_EXTENSIONS:
+            continue
+
+        creation_time = get_creation_time(src)
+        if creation_time is not None and src.suffix==".mp4":
+            print("Creation time for: ",src)
+        elif creation_time is None and src.suffix!=".mp4":
+            print("No Creation time for: ",src)
+        # if creation_time is None:
+        #     print(
+        #         f"Warning: no creation time found for {src}. "
+        #         "Video will be placed at the end of its camera group."
+        #     )
+
+        camera = get_camera(src, video_root)
+
+        rows.append(
+            {
+                "path": src,
+                "video": src.stem,
+                "camera": camera,
+                "creation_time": creation_time,
+            }
+        )
+
+    df = pd.DataFrame(rows)
+
+    if df.empty:
+        return df
+
+    # Sort videos by camera and then by creation time.
+    # Videos without creation_time are placed last.
+    df = df.sort_values(
+        by=["camera", "creation_time"],
+        na_position="last",
+    ).reset_index(drop=True)
+
+    return df
+
+
+# ============================================================
+# VIDEO PROCESSING
+# ============================================================
 
 def process_video(
-        source_path: Path,
-        video_name: str,
-        detection_model,
-        target_fps: int = 2
+    source_path: Path,
+    video_name: str,
+    detection_model,
+    tracker,
+    target_fps: int = 2,
 ):
+    """
+    Process one video using the provided persistent tracker.
+
+    The tracker is passed from the caller so that it can be kept
+    between successive videos.
+    """
 
     cap = cv2.VideoCapture(str(source_path))
 
@@ -60,35 +187,30 @@ def process_video(
         print(f"Cannot open {source_path}")
         return pd.DataFrame()
 
-
     source_fps = cap.get(cv2.CAP_PROP_FPS)
+
+    if source_fps <= 0:
+        print(f"Invalid FPS for {source_path}")
+        cap.release()
+        return pd.DataFrame()
 
     stride = max(
         1,
-        round(source_fps / target_fps)
+        round(source_fps / target_fps),
     )
-
-
-    tracker = sv.ByteTrack()
-
 
     frame_id = 0
 
     detections_rows = []
 
-    track_scores = {}
-
-
     total_frames = int(
         cap.get(cv2.CAP_PROP_FRAME_COUNT)
     )
 
-
     pbar = tqdm(
         total=total_frames,
-        desc=video_name
+        desc=video_name,
     )
-
 
     while True:
 
@@ -97,15 +219,12 @@ def process_video(
         if not ret:
             break
 
-
         if frame_id % stride == 0:
-
 
             results_det = detection_model.single_image_detection(
                 frame,
-                img_path=frame_id
+                img_path=frame_id,
             )
-
 
             if (
                 results_det is not None
@@ -114,47 +233,34 @@ def process_video(
 
                 det = results_det["detections"]
 
-
-                # Convert PytorchWildlife detections
-                # to Supervision format
-
                 detections = sv.Detections(
                     xyxy=det.xyxy,
                     confidence=det.confidence,
-                    class_id=det.class_id
+                    class_id=det.class_id,
                 )
-
 
                 tracked = tracker.update_with_detections(
                     detections
                 )
-
 
                 if tracked.tracker_id is not None:
 
                     for bbox, conf, track_id in zip(
                         tracked.xyxy,
                         tracked.confidence,
-                        tracked.tracker_id
+                        tracked.tracker_id,
                     ):
 
                         track_id = int(track_id)
                         conf = float(conf)
 
-
-                        track_scores[track_id] = (
-                            track_scores.get(track_id, 0)
-                            + conf
-                        )
-
-
                         detections_rows.append(
                             {
                                 "video": video_name,
                                 "frame": frame_id,
-                                "track_id": track_id,
+                                "track": track_id,
                                 "label": "body",
-                                "conf": round(conf,2),
+                                "conf": round(conf, 2),
                                 "x1": int(round(bbox[0])),
                                 "y1": int(round(bbox[1])),
                                 "x2": int(round(bbox[2])),
@@ -162,116 +268,159 @@ def process_video(
                             }
                         )
 
-
         frame_id += 1
         pbar.update(1)
-
 
     pbar.close()
     cap.release()
 
-
     if not detections_rows:
         return pd.DataFrame()
 
-
-    df = pd.DataFrame(
-        detections_rows
-    )
+    return pd.DataFrame(detections_rows)
 
 
-    best_track = max(
-        track_scores,
-        key=track_scores.get
-    )
-
-
-    print(
-        f"{video_name}: keep track {best_track} "
-        f"(confidence sum={track_scores[best_track]:.2f})"
-    )
-
-
-    return df[
-        df.track_id == best_track
-    ].copy()
-
-
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
 
-    all_dfs = []
+    # --------------------------------------------------------
+    # Retrieve and sort video metadata
+    # --------------------------------------------------------
 
+    videos_df = get_video_metadata(VIDEO_PATH)
+    # videos_df = videos_df[videos_df.video.isin(test_videos)]
 
-    dt = pd.read_excel(
-        TO_CROP_VIDEO_PATH,
-        header=0,
-        engine="odf"
-    )
-
-
-    for _, row in dt.iterrows():
-
-        video = row["video"]
-        camera = row["camera"]
-        indiv = row["indiv_name"]
-        mode = row["mode"]
-
-
-        src = None
-
-        for ext in [
-            ".mp4",
-            ".MP4",
-            ".AVI",
-            ".avi"
-        ]:
-
-            candidate = (
-                Video_PATH
-                / camera
-                / indiv
-                / mode
-                / f"{video}{ext}"
-            )
-
-            if candidate.exists():
-                src = candidate
-                break
-
-
-        if src is None:
-            print(f"Missing video: {video}")
-            continue
-
-
-        df = process_video(
-            source_path=src,
-            video_name=video,
-            detection_model=detection_model,
-            target_fps=2
-        )
-
-
-        if not df.empty:
-            all_dfs.append(df)
-
-
-
-    if len(all_dfs) == 0:
-        print("No detections found")
+    if videos_df.empty:
+        print("No videos found.")
         return
 
+    print(
+        f"Found {len(videos_df)} videos "
+        f"from {videos_df['camera'].nunique()} cameras."
+    )
+
+    # --------------------------------------------------------
+    # Process each camera independently
+    # --------------------------------------------------------
+
+    all_dfs = []
+
+    for camera, camera_videos in videos_df.groupby(
+        "camera",
+        sort=False,
+    ):
+
+        print(
+            f"\n{'=' * 60}\n"
+            f"Camera: {camera}\n"
+            f"{'=' * 60}"
+        )
+
+        # New tracker for each camera.
+        # Track IDs therefore cannot be shared between cameras.
+        tracker = sv.ByteTrack()
+
+        previous_creation_time = None
+
+        for _, video_info in camera_videos.iterrows():
+
+            src = video_info["path"]
+            video_name = video_info["video"]
+            creation_time = video_info["creation_time"]
+
+            # ------------------------------------------------
+            # Decide whether the tracker should be reset
+            # ------------------------------------------------
+
+            reset_tracker = False
+
+            if previous_creation_time is not None and creation_time is not None:
+
+                gap_seconds = (
+                    creation_time - previous_creation_time
+                ).total_seconds()
+
+                if gap_seconds >= MAX_VIDEO_GAP_SECONDS:
+                    reset_tracker = True
+
+                    print(
+                        f"\nGap of {gap_seconds:.1f}s before "
+                        f"{video_name} -> resetting tracker"
+                    )
+
+                else:
+                    print(
+                        f"\nGap of {gap_seconds:.1f}s before "
+                        f"{video_name} -> keeping tracker"
+                    )
+
+            elif previous_creation_time is None:
+                print(
+                    f"\nFirst video for camera {camera} "
+                    f"-> initializing tracker"
+                )
+
+            else:
+                print(
+                    f"\nNo creation time for {video_name} "
+                    f"-> keeping current tracker"
+                )
+
+            if reset_tracker:
+                tracker = sv.ByteTrack()
+
+            # ------------------------------------------------
+            # Process video
+            # ------------------------------------------------
+
+            df = process_video(
+                source_path=src,
+                video_name=video_name,
+                detection_model=detection_model,
+                tracker=tracker,
+                target_fps=TARGET_FPS,
+            )
+
+            if not df.empty:
+                all_dfs.append(df)
+
+            # Update previous video timestamp
+            if creation_time is not None:
+                previous_creation_time = creation_time
+
+    # --------------------------------------------------------
+    # Save results
+    # --------------------------------------------------------
+
+    if not all_dfs:
+        print("No detections found.")
+        return
 
     all_df = pd.concat(
         all_dfs,
-        ignore_index=True
+        ignore_index=True,
     )
 
-
     all_df.to_csv(
-        BODY_PATH,
-        index=False
+        CSV_PATH,
+        index=False,
+    )
+
+    print(
+        f"\nSaved {len(all_df)} detections to {CSV_PATH}"
+    )
+
+    print(
+        f"Number of videos: "
+        f"{all_df['video'].nunique()}"
+    )
+
+    print(
+        f"Number of tracks: "
+        f"{all_df['track'].nunique()}"
     )
 
 

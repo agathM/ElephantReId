@@ -8,5 +8,5 @@ mode: ""
 selection_type: "entry"
 date: "08_21"
 split_version: "v4" #with crop number included in split
-crop_version: "v3" #without background
-model_name: "ResNet50"
+crop_version: "v4" #without background with head box
+model_name: "ResNet50" #14th
