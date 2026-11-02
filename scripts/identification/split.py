@@ -22,6 +22,13 @@ import pandas as pd
 # Greedy split configuration
 DEFAULT_max_runs = 100
 
+def next_split_version(split_dir: Path) -> tuple[str, Path]:
+    """Next split version for a label
+    """
+    versions = [int(file.stem[1:]) for file in split_dir.glob(".csv")]
+    version = f"v{max(versions) + 1 if versions else 1}"
+    return version
+
 
 def _assign_event_by_period(clips_dataframe: pd.DataFrame, period: str) -> pd.Series:
     """
@@ -424,7 +431,7 @@ def main(params: Dict[str, Any]) -> None:
     for k in required:
         if k not in params:
             raise ValueError(f"Missing parameter in dict: {k}")
-
+    label = params["label"]
     event = params["event"]
     max_runs = params.get("max_runs")
     images_df = params["images_df"]
@@ -432,6 +439,8 @@ def main(params: Dict[str, Any]) -> None:
     train_ratio = params["train_ratio"]
     min_crop_per_indiv_for_val = params["min_crop_per_indiv_for_val"]
     database_path = params["video_database"]
+    split_dir = params["split_dir"]
+    force_val = params.get("force_val")
     crops_count_df = images_df.groupby(['indiv'])['image'].nunique().reset_index(name='nb_crops')
 
     # Load database
@@ -469,7 +478,12 @@ def main(params: Dict[str, Any]) -> None:
             greedy_df,
             max_runs=max_runs,
             forced_train_events=forced_events,
+            force_val=force_val
         )
 
     images_df = images_df.merge(videos_with_event[["video","event"]],on="video", how="inner").drop(columns="video")
+    images_df.to_csv(split_dir / label / f"selected_images_{event}_{max_runs}_{train_ratio}_{min_crop_per_indiv_for_val}_{force_val}.csv", index=False)
+    splits_df.to_csv(
+        split_dir / label / f"splits_{event}_{max_runs}_{train_ratio}_{min_crop_per_indiv_for_val}_{force_val}.csv",
+        index=False)
     return splits_df, images_df

@@ -60,6 +60,7 @@ split:
     max_runs: 10 #sélection des runs les plus différents, pour le jour peu de différences, pour le split par évènement bcp plus : faire un premier script pour choisir des runs?
     train_ratio: 0.75
     min_crop_per_indiv_for_val: 10
+    force_val: True #if an indiv appears in more than 2 events at least one in val
 
 # Image preprocessing
 transform_function: "brightness_normalized" #choose function from src.identification.preprocessing or None

@@ -20,31 +20,32 @@ USAGE
 """
 
 from __future__ import annotations
-
 import argparse
-import os
 import shutil
-import sys
 from pathlib import Path
-
+import importlib
 import pandas as pd
 import yaml
+from scripts.identification import train_classifier, detect_and_track
 
-# ============================================================
-# BOOTSTRAP : le pipeline doit pouvoir être importé comme
-# `scripts.pipeline` (racine du dépôt dans sys.path)
-# ============================================================
-REPO_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = Path('/pbs/home/a/ameurisse')
+from IPython.core.magics import script
 
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+#DETECTION CHOICES
+DETECT_CHOICES = ['ear_seg','head_detect','ear_detect'] #
 
-from scripts.identification import train_classifier
+#DEFAULT PARAMETERS FOR CHOICES
+DETECT_PARAMS = {}
+for choice in DETECT_CHOICES:
+    if choice in ['ear_detect','head_detect']:
+        DETECT_PARAMS.setdefault("head_ears_detect_09_08",{"conf":0.1,
+                                                              'labels_to_keep':[choice]
+                                                              })['labels_to_keep'].append(choice)
+    elif choice =="body_detect":
+        DETECT_PARAMS["MDV6-yolov10-e"] ={"conf":0.1,'labels_to_keep':[choice]}
+    elif choice =="ear_seg":
+        DETECT_PARAMS["seg_ears_lr_v2"] = {"conf":0.1,'labels_to_keep':[choice]}
 
-# ============================================================
-# COLONNES DU TABLEAU RÉCAPITULATIF DES EXPÉRIENCES
-# ============================================================
+
 EXPERIMENT_COLUMNS = [
     "version",
     "dataset_date",
@@ -60,10 +61,8 @@ EXPERIMENT_COLUMNS = [
 EXPERIMENTS_CSV_NAME = "all_experiments.csv"
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-def load_config(config_path: Path) -> dict:
+
+def load_config(config_dir: Path) -> dict:
     """Charge le fichier de configuration du pipeline."""
     config_path = config_dir / "pipeline.yaml"
     with open(config_path, "r", encoding="utf-8") as file:
@@ -81,7 +80,7 @@ def next_results_dir(results_root: Path) -> tuple[str, Path]:
 
     def contains_any_file(folder):
         """Return True if the folder or any subfolder contains at least one file."""
-        return any(p.is_file() for p in Path(folder).rglob("*"))
+        return any((p.is_file() and p.suffix != ".yaml") for p in Path(folder).rglob("*"))
     versions = []
     if results_root.exists():
         for child in results_root.iterdir():
@@ -363,24 +362,73 @@ def main(argv: list[str] | None = None) -> None:
     copied = copy_config_files(config_dir, config, results_dir)
     for path in copied:
         print(f"  - {path.name}")
-
-    # DETECTION
-    detection = config['detection']
+    crops_dir = Path(config["home_dir"]) / config["crops_dir"]
+    # DETECTIONS
+    detection = config["detection"]
+    detection['crops_dir'] = config["crops_dir"]
     detection['home_dir'] = home_dir
+    detection["split_dir"] = Path(config["home_dir"]) / config["split_dir"]
     detection['frame_database'] = frame_database
     detection['video_database'] = config["video_database"]
+    print("Detections")
     import scripts.identification.detect_and_track as detect
-    detect.main(detection)
+    for model in DETECT_PARAMS:
+        detection['model_name'] = model
+        detection['conf'] = DETECT_PARAMS[model]["conf"]
+        detection['labels_to_keep'] = DETECT_PARAMS[model]["labels_to_keep"]
+        print(f"Model : {model}")
+        print(f"Labels : {detection['labels_to_keep']}")
+        detect.main(detection)
 
-    if not os.path.exists(split_file):
-        import scripts.create_split as create_split
-        create_split.main(split_metadata)
-
+    # DETECTIONS FILTERING
+    # FIRST CONFIDENCE SCORE AND AREA, THEN SCRIPTS FOR COMPLEX FILTERS
+    selected_dfs = {}
+    filters = config['filter']
+    split_config = config["split"]
+    for model in DETECT_PARAMS:
+        for label in DETECT_PARAMS[model]["labels_to_keep"]:
+            filter = filters[label]
+            split_metadata = split_config + filters[label]
+            conf = filter["conf"]
+            min_area = filter["min_area"]
+            min_ratio = filter["min_ratio"]
+            max_ratio = filter["max_ratio"]
+            crops_file = crops_dir / f"{model.split(".")[0]}.csv"
+            df = pd.read_csv(crops_file)
+            df = df[(df.conf>=conf) & (df.area>=min_area)]
+            if min_ratio:
+                df = df[df.ratio>=min_ratio]
+            if max_ratio:
+                df = df[df.ratio<=max_ratio]
+            selected_dfs[label] = df
+            script_names = filter["script"]
+            if script_names:
+                for script_name in script_names:
+                    if script_name:
+                        filter_script = importlib.import_module(
+                        f"scripts.identification.detection_filters.{script_name}"
+                        )
+                        selected_dfs[label] = filter_script.main(selected_dfs[label],crops_dir,model)
+    #SPLIT DETECTIONS
+    splits_dfs = {}
+    images_dfs = {}
+    split_config["video_database"] = Path(config["home_dir"]) / config["video_database"]
+    split_config["split_dir"] = Path(config["home_dir"]) / config["split_dir"]
+    import scripts.identification.split as split
+    for label in selected_dfs:
+        split_config['images_df'] = selected_dfs[label]
+        split_config['label'] = label
+        split_metadata = split_config + filters[label]
+        splits_df, images_df = split.main(split_config)
+        images_dfs[label] = images_df
+        splits_dfs[label] = splits_df
+        print(splits_df.head())
+        print(images_df.head())
 
     # ------------------------------------------------------------
     # 2) ENTRAÎNEMENT
     # ------------------------------------------------------------
-    args = build_training_args(config, config_path, results_dir)
+    args = build_training_args(config, config_dir, results_dir)
 
     check_inputs(args)
 

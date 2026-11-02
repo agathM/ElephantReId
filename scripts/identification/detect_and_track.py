@@ -10,7 +10,7 @@ This script:
     video, frame, track_id, label, confidence, x1, y1, x2, y2, indiv
 - First check that detections without ids can be match with the frame_database or the video_database, if the images were not saved the video will be treated otherwise detection frame_database is updated
 """
-
+import shutil
 from pathlib import Path
 import cv2
 import numpy as np
@@ -77,16 +77,16 @@ def get_detection_id(row):
             return 0.0
 
         return (x_right - x_left) * (y_bottom - y_top) / area(box1)
-    id = None
-    max_intersection = 0
+    best_id, max_rate = None, 0
     for _,dt_row in rows.iterrows():
-        intersection = intersection_rate(dt_row, row)
-        if intersection>identification_threshold and intersection>max_intersection:
-            if id is not None:
+        rate = intersection_rate(dt_row, row)
+        if rate>identification_threshold and rate>max_rate:
+            if best_id is not None:
                 warnings.warn("Duplicate detection detected.")
-            id = dt_row["indiv"]
-            max_intersection = intersection
-    return id
+                print(best_id,dt_row["indiv"],row.video,row.frame)
+            best_id = dt_row["indiv"]
+            max_rate = rate
+    return best_id
 
 def get_partially_treated_video_to_treat(partially_treated_videos):
     """Actualize detection database with indiv from frame database
@@ -563,6 +563,8 @@ def process_video_seg(
                         row['indiv'] = indiv
                         last_detections[-1]['indiv'] = indiv
                         csv_rows.append(row)
+                        #if new detections new split will be calculated
+                        shutil.rmtree(split_dir / label)
 
                 if detections_by_frame is not None:
                     detections_by_frame[frame_number] = last_detections
@@ -747,6 +749,8 @@ def process_video_crop(
                         row['indiv'] = indiv
                         last_detections[-1]['indiv'] = indiv
                         csv_rows.append(row)
+                        # if new detections new split will be calculated
+                        shutil.rmtree(split_dir / label)
 
                 if detections_by_frame is not None:
                     detections_by_frame[frame_number] = last_detections
@@ -932,6 +936,8 @@ def process_video_megadetector(
                                 row['indiv'] = indiv
                                 last_detections[-1]['indiv'] = indiv
                                 csv_rows.append(row)
+                                # if new detections new split will be calculated
+                                shutil.rmtree(split_dir / label)
 
                 if detections_by_frame is not None:
                     detections_by_frame[frame_number] = last_detections
@@ -951,10 +957,12 @@ def process_video_megadetector(
 
 def main(metadata:dict):
     global frame_database_df, crops_dir, crops_file_path, identification_threshold, single_indiv_videos, \
-        save_videos_with_detections, tracked_videos_dir, labels
+        save_videos_with_detections, tracked_videos_dir, labels,split_dir
     home_dir = Path(metadata['home_dir'])
+    split_dir = Path(metadata['split_dir'])
     frame_database = home_dir / metadata['frame_database']
     frame_database_df = pd.read_csv(frame_database)
+    frame_database_df.dropna(subset=["indiv"],inplace=True)
     model_name = metadata['model_name']
     crops_dir = home_dir / metadata['crops_dir'] / model_name
     crops_file_path = home_dir / metadata['crops_dir'] / ( model_name + ".csv")
