@@ -39,7 +39,7 @@ CSV_COLUMNS = [
     "video",
     "frame",
     "track_id",
-    "label",
+    "detection",
     "conf",
     "x1",
     "y1",
@@ -104,7 +104,7 @@ def get_partially_treated_video_to_treat(partially_treated_videos):
 
     for idx, row in detections[mask].iterrows():
         detection_id = get_detection_id(row)
-        label = row["label"]
+        label = row["detection"]
         image = row["image"]
 
         if detection_id is not None:
@@ -472,7 +472,7 @@ def process_video_seg(
                             {
                                 "bbox": bbox,
                                 "cls": cls,
-                                "label": label,
+                                "detection": label,
                                 "conf": conf,
                                 "track_id": track_id,
                                 "indiv": None,
@@ -513,7 +513,7 @@ def process_video_seg(
                                 "track_id":
                                     track_id,
 
-                                "label":
+                                "detection":
                                     label.replace(" ","_"),
 
                                 "conf":
@@ -560,11 +560,11 @@ def process_video_seg(
                                 crops_dir / label.replace(" ", "_") / image,
                                 crop,
                             )
+                            # new detection with id implies that new split will have to be created
+                            shutil.rmtree(split_dir)
                         row['indiv'] = indiv
                         last_detections[-1]['indiv'] = indiv
                         csv_rows.append(row)
-                        #if new detections new split will be calculated
-                        shutil.rmtree(split_dir / label)
 
                 if detections_by_frame is not None:
                     detections_by_frame[frame_number] = last_detections
@@ -687,7 +687,7 @@ def process_video_crop(
                             {
                                 "bbox": bbox,
                                 "cls": cls,
-                                "label": label,
+                                "detection": label,
                                 "conf": conf,
                                 "track_id": track_id,
                                 "indiv": None,
@@ -713,7 +713,7 @@ def process_video_crop(
                             "track_id":
                                 track_id,
 
-                            "label":
+                            "detection":
                                 label.replace(" ", "_"),
 
                             "conf":
@@ -746,11 +746,11 @@ def process_video_crop(
                                             frame[y1:y2, x1:x2])
                         else:
                             cv2.imwrite(crops_dir / label.replace(" ", "_") / image, frame[y1:y2, x1:x2])
+                            # new detection with id implies that new split will have to be created
+                            shutil.rmtree(split_dir)
                         row['indiv'] = indiv
                         last_detections[-1]['indiv'] = indiv
                         csv_rows.append(row)
-                        # if new detections new split will be calculated
-                        shutil.rmtree(split_dir / label)
 
                 if detections_by_frame is not None:
                     detections_by_frame[frame_number] = last_detections
@@ -865,7 +865,7 @@ def process_video_megadetector(
                                 last_detections.append(
                                     {
                                         "bbox": bbox,
-                                        "label": label,
+                                        "detection": label,
                                         "conf": conf,
                                         "track_id": track_id,
                                         "indiv": None,
@@ -889,7 +889,7 @@ def process_video_megadetector(
                                     "track_id":
                                         track_id,
 
-                                    "label":
+                                    "detection":
                                         label.replace(" ", "_"),
 
                                     "conf":
@@ -932,12 +932,12 @@ def process_video_megadetector(
                                         crops_dir / label.replace(" ", "_") / image,
                                         crop,
                                     )
+                                    # new detection with id implies that new split will have to be created
+                                    shutil.rmtree(split_dir)
 
                                 row['indiv'] = indiv
                                 last_detections[-1]['indiv'] = indiv
                                 csv_rows.append(row)
-                                # if new detections new split will be calculated
-                                shutil.rmtree(split_dir / label)
 
                 if detections_by_frame is not None:
                     detections_by_frame[frame_number] = last_detections

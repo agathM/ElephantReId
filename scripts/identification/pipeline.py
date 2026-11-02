@@ -26,7 +26,8 @@ from pathlib import Path
 import importlib
 import pandas as pd
 import yaml
-from scripts.identification import train_classifier, detect_and_track
+import train_classifier, detect_and_track
+import os
 
 from IPython.core.magics import script
 
@@ -163,14 +164,14 @@ def copy_config_files(
 
     Retourne la liste des fichiers copiés.
     """
-    results_dir.mkdir(parents=True, exist_ok=True)
 
     copied: list[Path] = []
     used_names: set[str] = set()
 
     for source in collect_config_files(config_dir, config):
         name = source.name
-        destination = results_dir / name
+        destination = results_dir / "input_metadata" / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
         copied.append(destination)
     return copied
@@ -254,7 +255,7 @@ def build_training_args(
     """Construit les arguments du script d'entraînement à partir du YAML."""
     paths = config.get("paths", {}) or {}
     values = train_classifier.build_path_values(config)
-    home_path = Path(config.get("home_path", ".")).expanduser()
+    home_path = Path(config.get("home_path", "..")).expanduser()
 
     crop_path = train_classifier.resolve_path(
         home_path, paths.get("crop_path", "data/crops"), values
@@ -290,6 +291,7 @@ def build_training_args(
         pretrained=None,
         device=None,
         limit_runs=None,
+        batch_norm_only=None,
         augmentation_params=None,
         preprocessing_function=None,
         transform_params=None,
@@ -299,16 +301,19 @@ def build_training_args(
 
 
 def check_inputs(args: argparse.Namespace) -> None:
-    """Vérifie que les fichiers d'entrée existent."""
+    """Check that crop directory and split/image dictionaries exist."""
     missing = []
-    for name in ("crop_path", "crop_file", "split_file"):
-        path = Path(getattr(args, name))
-        if not path.exists():
-            missing.append(f"{name} : {path}")
+    crop_path = getattr(args, "crop_path", None)
+    if not crop_path or not Path(crop_path).exists():
+        missing.append(f"crop_path: {crop_path}")
+
+    for name in ("images_dfs", "splits_dfs"):
+        if not getattr(args, name, None):
+            missing.append(name)
+
     if missing:
         raise FileNotFoundError(
-            "Fichiers d'entrée introuvables :\n  - "
-            + "\n  - ".join(missing)
+            "Missing training inputs:\n  - " + "\n  - ".join(missing)
         )
 
 
@@ -384,84 +389,108 @@ def main(argv: list[str] | None = None) -> None:
     detection['frame_database'] = frame_database
     detection['video_database'] = config["video_database"]
     print("Detections")
-    import scripts.identification.detect_and_track as detect
+    import detect_and_track as detect
     for model in DETECT_PARAMS:
         detection['model_name'] = model
         detection['conf'] = DETECT_PARAMS[model]["conf"]
         detection['labels_to_keep'] = DETECT_PARAMS[model]["labels_to_keep"]
         print(f"Model : {model}")
         print(f"Labels : {detection['labels_to_keep']}")
-        detect.main(detection)
+        #detect.main(detection)
 
-    # DETECTIONS FILTERING
-    # FIRST CONFIDENCE SCORE AND AREA, THEN SCRIPTS FOR COMPLEX FILTERS
-    selected_dfs = {}
+    # DETECTIONS FILTERING AND SPLIT
+    # FIRST CHECK THAT NO SPLIT WITH SAME FILTERING AND SPLIT PARAMETERS WAS DONE
     filters = config['filter']
     split_config = config["split"]
+    all_detections = []
     for model in DETECT_PARAMS:
         for label in DETECT_PARAMS[model]["labels_to_keep"]:
-            filter = filters[label]
-            split_metadata = split_config | filters[label]
-            split_metadata_df = pd.read_csv(split_dir / label / split_versions)
-            if get_existing_version(split_metadata_df,split_metadata):
-                continue
-            conf = filter["conf"]
-            min_area = filter["min_area"]
-            min_ratio = filter["min_ratio"]
-            max_ratio = filter["max_ratio"]
-            crops_file = crops_dir / f"{model.split(".")[0]}.csv"
-            df = pd.read_csv(crops_file)
-            df = df[(df.conf>=conf) & (df.area>=min_area)]
-            if min_ratio:
-                df = df[df.ratio>=min_ratio]
-            if max_ratio:
-                df = df[df.ratio<=max_ratio]
-            selected_dfs[label] = df
-            script_names = filter["script"]
-            if script_names:
-                for script_name in script_names:
-                    if script_name:
-                        filter_script = importlib.import_module(
-                        f"scripts.identification.detection_filters.{script_name}"
-                        )
-                        selected_dfs[label] = filter_script.main(selected_dfs[label],crops_dir,model)
+            all_detections.append(label)
+
+    filters_metadata = {
+        f"{key1}_{key2}": value if key1 in all_detections else None
+        for key1, sub_dict in filters.items()
+        for key2, value in sub_dict.items()
+    }
+    split_metadata = split_config | filters_metadata
+    if os.path.exists(split_dir / split_versions):
+        split_metadata_df = pd.read_csv(split_dir / split_versions)
+        split_version = get_existing_version(split_metadata_df, split_metadata)
+    else:
+        split_version = None
+
     #SPLIT DETECTIONS
-    splits_dfs = {}
-    images_dfs = {}
-    split_config["video_database"] = Path(config["home_dir"]) / config["video_database"]
-    import scripts.identification.split as split
-    for label in selected_dfs:
-        split_config['images_df'] = selected_dfs[label]
-        split_config['label'] = label
-        split_metadata = split_config | filters[label]
-        split_metadata_df = pd.read_csv(split_dir / label / split_versions)
-        version =  get_existing_version(split_metadata_df, split_metadata)
-        if version:
-            splits_df = pd.read_csv(split_dir / label / f"{version}_splits.csv")
-            images_df = pd.read_csv(split_dir / label / f"{version}_selected_images.csv")
-        else:
-            split_config["metadata"] = split_metadata
-            split_config["split_versions"] = split_dir / label / split_versions
-            splits_df, images_df = split.main(split_config)
-        images_dfs[label] = images_df
-        splits_dfs[label] = splits_df
+    if split_version:
+        splits_df = pd.read_csv(split_dir  / f"{split_version}_splits.csv")
+        images_df = pd.read_csv(split_dir / f"{split_version}_selected_images.csv")
+
+    else:
+        # FIRST CONFIDENCE SCORE AND AREA, THEN SCRIPTS FOR COMPLEX FILTERS
+        selected_dfs = []
+        for model in DETECT_PARAMS:
+            for label in DETECT_PARAMS[model]["labels_to_keep"]:
+                filter = filters[label]
+                conf = filter["conf"]
+                min_area = filter["min_area"]
+                min_ratio = filter["min_ratio"]
+                max_ratio = filter["max_ratio"]
+                crops_file = crops_dir / f"{model.split(".")[0]}.csv"
+                df = pd.read_csv(crops_file)
+                df = df[(df.conf >= conf) & (df.area >= min_area)]
+                if min_ratio:
+                    df = df[df.ratio >= min_ratio]
+                if max_ratio:
+                    df = df[df.ratio <= max_ratio]
+                script_names = filter["script"]
+                if script_names:
+                    for script_name in script_names:
+                        if script_name:
+                            filter_script = importlib.import_module(
+                                f"detection_filters.{script_name}"
+                            )
+                            df = filter_script.main(selected_dfs[label], crops_dir, model)
+                df['label'] = df["indiv"] + "_" + label  # vrai séparation gauche droite pour oreille?
+                selected_dfs.append(df)
+        selected_df = pd.concat(selected_dfs)
+        #GENERATE SPLIT OVER ALL DETECTIONS
+        split_config["video_database"] = Path(config["home_dir"]) / config["video_database"]
+        import split as split
+        split_config['images_df'] = selected_df
+        split_config["metadata"] = split_metadata
+        split_config["split_versions"] = split_dir / split_versions
+        splits_df, images_df = split.main(split_config)
         print(splits_df.head())
         print(images_df.head())
-
+    splits_df.to_csv(results_dir / "input_metadata" / f"{split_version}_splits.csv")
+    images_df.to_csv(results_dir / "input_metadata" / f"{split_version}_selected_images.csv")
+    """
     # ------------------------------------------------------------
-    # 2) ENTRAÎNEMENT
+    # 2) TRAINING
     # ------------------------------------------------------------
     args = build_training_args(config, config_dir, results_dir)
+
+    # The training script consumes the split/image dictionaries directly.
+    args.crop_path = str(crops_dir)
+    args.splits_dfs = splits_dfs
+    args.images_dfs = images_dfs
 
     check_inputs(args)
 
     summary_df = train_classifier.run_training(args)
-    summary_df['train_weights'] = summary_df.num_train / summary_df.num_train.sum()
+    if summary_df.empty:
+        return
+    summary_df['train_weights'] = (
+        summary_df.num_train / summary_df.num_train.sum()
+    )
     summary_df['val_weights'] = summary_df.num_val / summary_df.num_val.sum()
     train_std = summary_df.train_acc.std(axis=0)
     val_std = summary_df.val_acc.std(axis=0)
-    mean_train_acc_over_runs = (summary_df['train_acc']*summary_df['train_acc']).mean()
-    mean_val_acc_over_runs = (summary_df['val_acc'] * summary_df['val_acc']).mean()
+    mean_train_acc_over_runs = (
+        (summary_df['train_acc'] * summary_df['train_acc']).mean()
+    )
+    mean_val_acc_over_runs = (
+        (summary_df['val_acc'] * summary_df['val_acc']).mean()
+    )
 
     # ------------------------------------------------------------
     # 3) TABLEAU RÉCAPITULATIF DES EXPÉRIENCES
@@ -485,7 +514,7 @@ def main(argv: list[str] | None = None) -> None:
     experiments_path = results_root / EXPERIMENTS_CSV_NAME
     df = update_experiment_df(experiments_path, [row])
     print(f"\nTableau des expériences : {experiments_path}")
-    print(df.to_string(index=False))
+    print(df.to_string(index=False))"""
 
 
 if __name__ == "__main__":

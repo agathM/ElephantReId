@@ -5,8 +5,8 @@ Goal:
 - Take a dict as input:
   {'event': 'day' | 'week' | 'month' | '5min' | '5h', 'max_runs': ..., 'images_df': ..., 'database': ...}
 - Assign an event to each video of `database` based on `event` and the `time` column (same logic as summary_videos_v2: event_day or entry < 5min)
-- Link via `images_df` (columns `video`, `indiv`) all indivs present per event
-- Apply the same rules as `manual_split.py` to crops/events (indiv with a single event -> train, indivs with < 10 crops -> train) using the chosen event
+- Link via `images_df` (columns `video`, `label`) all labels present per event
+- Apply the same rules as `manual_split.py` to crops/events (label with a single event -> train, labels with < 10 crops -> train) using the chosen event
 - Enumerate all possible train/val assignment combinations for non-forced events and export a CSV with columns: event, run, split
 - Returns images_df with split column added
 """
@@ -149,85 +149,85 @@ def assign_events_to_videos(database: pd.DataFrame, event: str) -> tuple[pd.Data
     return df
 
 
-def get_indivs_per_event(videos_df: pd.DataFrame, img: str | Path):
+def get_labels_per_event(videos_df: pd.DataFrame, img: str | Path):
     """
-    Read images_df (columns video, indiv) and link all present indivs to each event.
+    Read images_df (columns video, label) and link all present labels to each event.
     """
-    # merge to link indiv to event
-    img.dropna(subset=['video',"indiv"], inplace=True)
-    merged = videos_df[["video", "event"]].drop_duplicates().merge(img[["image","video","indiv"]], on="video", how="inner")
+    # merge to link label to event
+    img.dropna(subset=['video',"label"], inplace=True)
+    merged = videos_df[["video", "event"]].drop_duplicates().merge(img[["image","video","label"]], on="video", how="inner")
     merged = merged.dropna(subset=["event"])
 
-    for col in ["video", "indiv"]:
+    for col in ["video", "label"]:
         if col not in img.columns:
-            raise ValueError(f"images_df must contain the 'video' and 'indiv' columns (found columns: {list(img.columns)})")
+            raise ValueError(f"images_df must contain the 'video' and 'label' columns (found columns: {list(img.columns)})")
 
-    img = img[["video", "indiv"]].dropna()
-    img["indiv"] = img["indiv"].astype(str)
+    img = img[["video", "label"]].dropna()
+    img["label"] = img["label"].astype(str)
 
 
 
-    # unique indivs per event
-    indivs_per_event = (
-        merged.groupby("event")["indiv"]
+    # unique labels per event
+    labels_per_event = (
+        merged.groupby("event")["label"]
         .apply(lambda s: sorted(set(s)))
-        .reset_index(name="indivs_list")
+        .reset_index(name="labels_list")
     )
     # reverse mapping
-    indiv_to_events = (
-        merged.drop_duplicates(["event", "indiv"])[["indiv", "event"]]
-        .groupby("indiv")["event"]
+    label_to_events = (
+        merged.drop_duplicates(["event", "label"])[["label", "event"]]
+        .groupby("label")["event"]
         .apply(lambda s: sorted(set(s)))
         .reset_index(name="events_list")
     )
-    return indivs_per_event, indiv_to_events, merged
+    return labels_per_event, label_to_events, merged
 
 
 def apply_manual_split_rules(
     videos_df: pd.DataFrame,
-    indiv_to_events: pd.DataFrame,
+    label_to_events: pd.DataFrame,
     crops_count_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Apply EXACTLY the same rules as manual_split.py but to the chosen event:
-    - indiv with nb_event == 1 -> all its events go to 'train'
-    - then indivs with nb_crop_per_indiv < min_crop_per_indiv_for_val -> all their remaining events go to 'train'
+    - label with nb_event == 1 -> all its events go to 'train'
+    - then labels with nb_crop_per_label < min_crop_per_label_for_val -> all their remaining events go to 'train'
     """
     df = videos_df[["event", "video"]].drop_duplicates().copy()
 
-    # number of events per indiv
-    indiv_nb_events = indiv_to_events.copy()
-    indiv_nb_events["nb_event"] = indiv_nb_events["events_list"].apply(len)
-    indiv_1_event = indiv_nb_events[indiv_nb_events["nb_event"] == 1]["indiv"].tolist()
+    # number of events per label
+    label_nb_events = label_to_events.copy()
+    label_nb_events["nb_event"] = label_nb_events["events_list"].apply(len)
+    label_1_event = label_nb_events[label_nb_events["nb_event"] == 1]["label"].tolist()
 
     # init empty split
     df["split"] = ""
 
-    # rule 1: indiv with only one event
-    events_for_indiv1 = set()
-    for _, row in indiv_to_events.iterrows():
-        indiv = row["indiv"]
-        if indiv in indiv_1_event:
+    # rule 1: label with only one event
+    events_for_label1 = set()
+    for _, row in label_to_events.iterrows():
+        label = row["label"]
+        if label in label_1_event:
             for ev in row["events_list"]:
-                events_for_indiv1.add(ev)
-    df.loc[df["event"].isin(events_for_indiv1), "split"] = "train"
+                events_for_label1.add(ev)
+    df.loc[df["event"].isin(events_for_label1), "split"] = "train"
 
-    # rule 2: number of crops per indiv < min_crop_per_indiv_for_val
+    # rule 2: number of crops per label < min_crop_per_label_for_val
     if crops_count_df is not None and not crops_count_df.empty:
-        nb_crop_per_indiv = crops_count_df.copy()
-        if "indiv" in nb_crop_per_indiv.columns and "nb_crop" in nb_crop_per_indiv.columns:
-            indiv_under_thresh = nb_crop_per_indiv[nb_crop_per_indiv["nb_crop"] < min_crop_per_indiv_for_val]["indiv"].tolist()
+        nb_crop_per_label = crops_count_df.copy()
+        if "label" in nb_crop_per_label.columns and "nb_crop" in nb_crop_per_label.columns:
+            label_under_thresh = nb_crop_per_label[nb_crop_per_label["nb_crop"] < min_crop_per_label_for_val]["label"].tolist()
             events_under_thresh = set()
-            for _, row in indiv_to_events.iterrows():
-                indiv = row["indiv"]
-                if indiv in indiv_under_thresh:
+            for _, row in label_to_events.iterrows():
+                label = row["label"]
+                if label in label_under_thresh:
                     for ev in row["events_list"]:
                         events_under_thresh.add(ev)
             mask = (df["split"] == "") & (df["event"].isin(events_under_thresh))
             df.loc[mask, "split"] = "train"
     else:
-        print("[WARN] No 'crops' count provided. Only the 'indiv with a single event' rule is strictly applied here. "
-              "If you have a crops df (video/indiv/crop_id) you can pass it via crops_count_df.")
+        print("[WARN] No 'crops' count provided. Only the 'label with a single event' rule is strictly applied here. "
+              "If you have a crops df (video/label/crop_id) you can pass it via crops_count_df.")
 
     return df
 
@@ -280,25 +280,25 @@ def greedy_split(
 ) -> pd.DataFrame:
     """
     Generate greedy train/val splits from a dataframe with columns
-    ``indiv``, ``event`` and ``image``.
+    ``label``, ``event`` and ``image``.
 
     The procedure is:
-    - individuals appearing in a single event -> all their events go to train;
-    - individuals appearing in exactly two events are tracked;
+    - labeliduals appearing in a single event -> all their events go to train;
+    - labeliduals appearing in exactly two events are tracked;
     - for each seed from 1 to ``max_runs``, the non-forced events are shuffled;
     - events are processed one by one:
-        * an event is put in train if it contains an individual with no image
-          in train yet (this guarantees at least one event per individual);
-        * an event is put in val if it contains an individual appearing in
+        * an event is put in train if it contains an labelidual with no image
+          in train yet (this guarantees at least one event per labelidual);
+        * an event is put in val if it contains an labelidual appearing in
           exactly two events that is already present in train;
         * otherwise, the event is assigned to train or val by comparing the
           resulting distance to ``train_ratio`` for every
-          individual, using the number of images the event adds for each
-          individual (``entry_n``).
+          labelidual, using the number of images the event adds for each
+          labelidual (``entry_n``).
 
     Returns a dataframe with columns ``event``, ``run`` and ``split``.
     """
-    required_cols = {"indiv", "event", "image"}
+    required_cols = {"label", "event", "image"}
     missing_cols = required_cols - set(df.columns)
     if missing_cols:
         raise ValueError(
@@ -312,36 +312,36 @@ def greedy_split(
     if max_runs < 1:
         raise ValueError("max_runs must be >= 1")
 
-    data = df[["indiv", "event", "image"]].dropna(subset=["indiv", "event"]).copy()
-    data["indiv"] = data["indiv"].astype(str)
+    data = df[["label", "event", "image"]].dropna(subset=["label", "event"]).copy()
+    data["label"] = data["label"].astype(str)
 
-    # Distinct images per (event, indiv) and per indiv
-    event_indiv_counts = (
-        data.groupby(["event", "indiv"])["image"]
+    # Distinct images per (event, label) and per label
+    event_label_counts = (
+        data.groupby(["event", "label"])["image"]
         .nunique()
         .astype(int)
     )
     total_image_counts = (
-        data.groupby("indiv")["image"]
+        data.groupby("label")["image"]
         .nunique()
         .astype(int)
     )
 
-    # Number of events per individual
-    events_per_indiv = data.groupby("indiv")["event"].nunique()
-    single_event_indivs = set(events_per_indiv[events_per_indiv == 1].index)
-    two_event_indivs = set(events_per_indiv[events_per_indiv == 2].index)
+    # Number of events per labelidual
+    events_per_label = data.groupby("label")["event"].nunique()
+    single_event_labels = set(events_per_label[events_per_label == 1].index)
+    two_event_labels = set(events_per_label[events_per_label == 2].index)
 
-    # Map each event to the image count of each individual
-    event_to_indiv_counts: dict[Any, dict[str, int]] = {}
-    for (event, indiv), n_images in event_indiv_counts.items():
-        event_to_indiv_counts.setdefault(event, {})[indiv] = int(n_images)
+    # Map each event to the image count of each labelidual
+    event_to_label_counts: dict[Any, dict[str, int]] = {}
+    for (event, label), n_images in event_label_counts.items():
+        event_to_label_counts.setdefault(event, {})[label] = int(n_images)
 
     all_events = data["event"].drop_duplicates().tolist()
 
-    # Events containing at least one single-event individual are forced to train
+    # Events containing at least one single-event labelidual are forced to train
     forced_train = set(
-        data.loc[data["indiv"].isin(single_event_indivs), "event"].unique().tolist()
+        data.loc[data["label"].isin(single_event_labels), "event"].unique().tolist()
     )
     if forced_train_events is not None:
         forced_train.update(pd.Series(list(forced_train_events)).dropna().tolist())
@@ -365,46 +365,46 @@ def greedy_split(
 
         split_by_event: dict[Any, str] = {}
         train_image_counts = {
-            indiv: 0
-            for indiv in total_image_counts.index
+            label: 0
+            for label in total_image_counts.index
         }
 
         # Forced train events are processed before the shuffled free events
         for event in forced_train:
             split_by_event[event] = "train"
-            for indiv, n_images in event_to_indiv_counts.get(event, {}).items():
-                train_image_counts[indiv] = train_image_counts.get(indiv, 0) + n_images
+            for label, n_images in event_to_label_counts.get(event, {}).items():
+                train_image_counts[label] = train_image_counts.get(label, 0) + n_images
 
         for event in shuffled_events:
-            indiv_counts = event_to_indiv_counts.get(event, {})
-            individuals = list(indiv_counts)
+            label_counts = event_to_label_counts.get(event, {})
+            labeliduals = list(label_counts)
 
-            # Priority 1: an individual with no image in train yet
+            # Priority 1: an labelidual with no image in train yet
             force_train = any(
-                train_image_counts.get(indiv, 0) == 0
-                for indiv in individuals
+                train_image_counts.get(label, 0) == 0
+                for label in labeliduals
             )
 
             if force_train:
                 split = "train"
-            # Priority 2: a two-event individual already present in train
+            # Priority 2: a two-event labelidual already present in train
             elif force_val and any(
-                indiv in two_event_indivs
-                and train_image_counts.get(indiv, 0) > 0
-                for indiv in individuals
+                label in two_event_labels
+                and train_image_counts.get(label, 0) > 0
+                for label in labeliduals
             ):
                 split = "val"
             else:
                 train_score = 0.0
                 val_score = 0.0
 
-                for indiv in individuals:
-                    current_train = train_image_counts.get(indiv, 0)
-                    total = int(total_image_counts.get(indiv, 0))
+                for label in labeliduals:
+                    current_train = train_image_counts.get(label, 0)
+                    total = int(total_image_counts.get(label, 0))
                     if total <= 0:
                         continue
 
-                    entry_n = int(indiv_counts[indiv])
+                    entry_n = int(label_counts[label])
 
                     train_proportion = (current_train + entry_n) / total
                     val_proportion = current_train / total
@@ -426,9 +426,9 @@ def greedy_split(
             split_by_event[event] = split
 
             if split == "train":
-                for indiv, n_images in indiv_counts.items():
-                    train_image_counts[indiv] = (
-                        train_image_counts.get(indiv, 0) + n_images
+                for label, n_images in label_counts.items():
+                    train_image_counts[label] = (
+                        train_image_counts.get(label, 0) + n_images
                     )
 
         for event in all_events:
@@ -448,25 +448,24 @@ def main(params: Dict[str, Any]) -> None:
     Main function taking a dictionary with:
     output_file, event, max_runs, images_df, database
     """
-    global train_ratio, min_crop_per_indiv_for_val
-    required = ["max_runs", "event", "images_df", "video_database","min_crop_per_indiv_for_val"]
+    global train_ratio, min_crop_per_label_for_val
+    required = ["max_runs", "event", "images_df", "video_database","min_crop_per_label_for_val"]
     for k in required:
         if k not in params:
             raise ValueError(f"Missing parameter in dict: {k}")
-    label = params["label"]
     event = params["event"]
     max_runs = params.get("max_runs")
     images_df = params["images_df"]
     videos_with_detections = images_df.video.unique()
     train_ratio = params["train_ratio"]
-    min_crop_per_indiv_for_val = params["min_crop_per_indiv_for_val"]
+    min_crop_per_label_for_val = params["min_crop_per_label_for_val"]
     database_path = params["video_database"]
     split_versions = params["split_versions"]
     split_metadata = params["metadata"]
     version = next_split_version(split_versions,split_metadata)
 
     force_val = params.get("force_val")
-    crops_count_df = images_df.groupby(['indiv'])['image'].nunique().reset_index(name='nb_crops')
+    crops_count_df = images_df.groupby(['label'])['image'].nunique().reset_index(name='nb_crops')
 
     # Load database
     db_path = Path(database_path)
@@ -479,21 +478,21 @@ def main(params: Dict[str, Any]) -> None:
     videos_with_event = assign_events_to_videos(database, event)
     print(f"[INFO] Number of videos with event: {len(videos_with_event)}")
 
-    # 2) Link indivs per event via images_df
-    indivs_per_event, indiv_to_events, merged_iev = get_indivs_per_event(videos_with_event, images_df)
-    print(f"[INFO] Number of events with at least one indiv: {len(indivs_per_event)}")
-    print(f"[INFO] Number of indivs involved: {len(indiv_to_events)}")
+    # 2) Link labels per event via images_df
+    labels_per_event, label_to_events, merged_iev = get_labels_per_event(videos_with_event, images_df)
+    print(f"[INFO] Number of events with at least one label: {len(labels_per_event)}")
+    print(f"[INFO] Number of labels involved: {len(label_to_events)}")
 
     # 3) Apply manual_split rules
-    event_split_forced = apply_manual_split_rules(videos_with_event, indiv_to_events, crops_count_df)
+    event_split_forced = apply_manual_split_rules(videos_with_event, label_to_events, crops_count_df)
     print(f"[INFO] Forced split distribution:\n{event_split_forced['split'].value_counts(dropna=False)}")
 
     # 4) Generate all train/val combinations, or use greedy splits if there are too many
     splits_df = generate_combinations(event_split_forced, max_runs=max_runs)
     if splits_df is None:
-        # greedy_split expects columns indiv, event, image
+        # greedy_split expects columns label, event, image
         greedy_df = (
-            merged_iev[["image", "event", "indiv"]]
+            merged_iev[["image", "event", "label"]]
         )
         forced_events = event_split_forced.loc[
             event_split_forced["split"] == "train",

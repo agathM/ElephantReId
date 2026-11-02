@@ -80,7 +80,7 @@ def keep_image(image_path):
 
 def main(df, crops_dir, model):
     def get_image_path(row):
-        img_path = crops_dir / model / row["label"] / row["image"]
+        img_path = crops_dir / model / row["detection"] / row["image"]
         if not os.path.isfile(img_path):
             img_path = crops_dir / model / row["image"]
 
