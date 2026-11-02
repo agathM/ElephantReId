@@ -5,17 +5,17 @@ import cv2
 LUMINANCE = np.array([0.299, 0.587, 0.114])
 
 
-def transform_original(image):
+def original(image):
     """Image originale, aucune transformation."""
     return image
 
 
-def transform_grayscale(image):
+def grayscale(image):
     """Image en niveaux de gris, reconvertie en RGB (3 canaux)."""
     return image.convert("L").convert("RGB")
 
 
-def transform_brightness_normalized(image, target_mean=0.5):
+def brightness_normalized(image, target_mean=0.5):
     """
     Normalise la luminosité moyenne de l'image.
 
@@ -39,7 +39,7 @@ def transform_brightness_normalized(image, target_mean=0.5):
     )
 
 
-def transform_contrast_normalized(image):
+def contrast_normalized(image):
     """
     Normalise le contraste : (luminance - mean) / std, ramené à [0, 1]
     pour la visualisation. L'image de sortie est en niveaux de gris.
@@ -70,7 +70,7 @@ def transform_contrast_normalized(image):
     )
 
 
-def transform_clahe(image, clip_limit=2.0, tile_grid_size=(8, 8)):
+def clahe(image, clip_limit=2.0, tile_grid_size=(8, 8)):
     """
     Applique CLAHE (Contrast Limited Adaptive Histogram Equalization)
     sur l'image en niveaux de gris, puis reconvertit en RGB.
@@ -88,7 +88,7 @@ def transform_clahe(image, clip_limit=2.0, tile_grid_size=(8, 8)):
     return Image.fromarray(result).convert("RGB")
 
 
-def transform_histogram_equalized(image):
+def histogram_equalized(image):
     """
     Applique une histogram equalization GLOBALE (cv2.equalizeHist) sur
     l'image en niveaux de gris, puis reconvertit en RGB.

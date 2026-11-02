@@ -185,12 +185,40 @@ def set_seed(seed: int) -> None:
 
 
 
-# Prétraitements disponibles (nom -> fonction). `None` = pas de prétraitement.
-PREPROCESSING = {
-    "brightness_normalized": transform_brightness_normalized,
-    "none": None,
-    None: None,
-}
+# Prétraitements disponibles : les fonctions sont définies dans
+# `image_preprocessing.py` et résolues par leur nom. `None` = pas de
+# prétraitement.
+
+
+
+def resolve_preprocessing(name) -> Callable | None:
+    """Return function from `image_preprocessing.py` with the same name
+    """
+    if name is None:
+        return None
+
+    key = str(name).strip()
+
+    # Import paresseux : `image_preprocessing` n'est chargé que si besoin.
+    try:
+        from scripts.identification import image_preprocessing
+    except ModuleNotFoundError:
+        import image_preprocessing  # exécution directe du script
+
+    function = getattr(image_preprocessing, key, None)
+
+    if function:
+        return function
+
+    available = sorted(
+        attr
+        for attr in dir(image_preprocessing)
+        if callable(getattr(image_preprocessing, attr))
+    )
+    raise ValueError(
+        f"Prétraitement inconnu : {name} "
+        f"(choix : {', '.join(available)})"
+    )
 
 
 def _parse_sequence(value) -> list | None:
@@ -332,11 +360,14 @@ def build_input_transform(
     """
     operations = []
 
-    preprocessing = PREPROCESSING.get(preprocessing_name, None)
-    if preprocessing_name is not None and preprocessing is None:
-        warnings.warn(
-            f"Prétraitement inconnu : {preprocessing_name} (ignoré)."
-        )
+    preprocessing = None
+    if preprocessing_name is not None:
+        try:
+            preprocessing = resolve_preprocessing(preprocessing_name)
+        except ValueError:
+            warnings.warn(
+                f"Prétraitement inconnu : {preprocessing_name} (ignoré)."
+            )
     if preprocessing is not None:
         params = preprocessing_params or {}
         operations.append(
