@@ -49,7 +49,7 @@ def next_split_version(split_versions: Path, row: dict) -> tuple[str, Path] | No
         index=False,
     )
 
-    return version, split_file
+    return version
 
 
 def _assign_event_by_period(clips_dataframe: pd.DataFrame, period: str) -> pd.Series:

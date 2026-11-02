@@ -298,39 +298,53 @@ def _normalize_jitter_value(value):
     raise ValueError(f"paramètre ColorJitter invalide : {value}")
 
 
-def build_augmentation(params: dict | None) -> transforms.Compose | None:
+def build_augmentation(
+    params: dict | None,
+    aug_flags: dict | None = None,
+) -> transforms.Compose | None:
     """Construit l'augmentation RandomAffine + ColorJitter depuis le YAML.
 
-    `params` = contenu de `data_augmentation.data_transformation.params`.
+    `params` = contenu de `data_augmentation.torch_transformation`
+    (ou `data_transformation.params` pour compatibilité).
+    `aug_flags` = dict issu de `pipeline.AUG_PARAMS` (clés
+    ``rotation``, ``translation``, ``scaling``, ``saturation``, ``hue``).
+    Seules les transformations dont le flag est ``True`` sont appliquées.
     """
     if not params:
         return None
 
+    flags = aug_flags or {}
     operations = []
 
     affine_params = params.get("affine") or {}
     if affine_params:
         kwargs = {}
-        if affine_params.get("degrees") is not None:
+        if flags.get("rotation", True) and affine_params.get("degrees") is not None:
             kwargs["degrees"] = affine_params["degrees"]
-        translate = _normalize_translate(affine_params.get("translate"))
-        if translate is not None:
-            kwargs["translate"] = translate
-        scale = _normalize_scale(affine_params.get("scale"))
-        if scale is not None:
-            kwargs["scale"] = scale
+        if flags.get("translation", True):
+            translate = _normalize_translate(affine_params.get("translate"))
+            if translate is not None:
+                kwargs["translate"] = translate
+        if flags.get("scaling", True):
+            scale = _normalize_scale(affine_params.get("scale"))
+            if scale is not None:
+                kwargs["scale"] = scale
         if affine_params.get("shear") is not None:
             kwargs["shear"] = affine_params["shear"]
-        operations.append(transforms.RandomAffine(**kwargs))
+        if kwargs:
+            operations.append(transforms.RandomAffine(**kwargs))
 
     jitter_params = (
-        params.get("colorjittering")
+        params.get("colorjitter")
+        or params.get("colorjittering")
         or params.get("color_jitter")
         or {}
     )
     if jitter_params:
         kwargs = {}
         for key in ("brightness", "contrast", "saturation", "hue"):
+            if not flags.get(key, True):
+                continue
             if jitter_params.get(key) is None:
                 continue
             normalized = _normalize_jitter_value(jitter_params[key])
@@ -395,17 +409,13 @@ def build_input_transform(
 class ImageCropDataset(Dataset):
     """Dataset over raw crop images.
 
-    Images are stored as ``crop_dir / task / image_label / image_name``:
+    Images are stored as ``crop_dir / model_name / detection / image_name``:
 
     * ``crop_dir`` is the root crop directory;
-    * ``task`` is the detection model/task name;
-    * ``image_label`` is the per-image detection label (for example
-      ``"left_ear_seg"``).
-
-    ``labels`` contains the classification targets. Following the pipeline
-    convention, a target is the pair ``(indiv, task_label)`` where
-    ``task_label`` is the key of the ``images_dfs``/``splits_dfs``
-    dictionaries.
+    * ``model_name`` is the detection model name, resolved from the parent
+      directory of the detection folder;
+    * ``detection`` is the value of the ``detection`` column of
+      ``images_df`` (for example ``"left_ear_seg"``).
 
     The transform (including random augmentation) is applied on every
     ``__getitem__`` call, so each image is re-transformed at every epoch.
@@ -428,25 +438,25 @@ class ImageCropDataset(Dataset):
         crop_ids: list,
         labels,
         transform,
-        image_labels: list | None = None,
-        task: str | None = None,
+        model_names: list | None = None,
+        detections: list | None = None,
         metadata: list | None = None,
     ):
         self.crop_dir = Path(crop_dir)
         self.crop_ids = crop_ids
         self.labels = labels
         self.transform = transform
-        self.image_labels = image_labels
-        self.task = task
+        self.model_names = model_names
+        self.detections = detections
         self.metadata = metadata
 
     def _image_path(self, idx: int) -> Path:
-        """Return ``crop_dir / task / image_label / image_name``."""
+        """Return ``crop_dir / model_name / detection / image_name``."""
         path = self.crop_dir
-        if self.task is not None:
-            path = path / str(self.task)
-        if self.image_labels is not None:
-            path = path / str(self.image_labels[idx])
+        if self.model_names is not None:
+            path = path / str(self.model_names[idx])
+        if self.detections is not None:
+            path = path / str(self.detections[idx])
         return path / str(self.crop_ids[idx])
 
     def __len__(self):
@@ -796,14 +806,8 @@ def find_early_stop_epoch(
     return len(train_accuracies) - 1
 
 
-def _safe_name(value) -> str:
-    """Return a filesystem-friendly version of ``value``."""
-    return str(value).replace(" ", "_").replace("/", "_")
-
-
 def save_train_curves(
     out_dir: Path,
-    label,
     run: int,
     train_error: list,
     val_error: list,
@@ -814,8 +818,7 @@ def save_train_curves(
     """Save train/validation curves for one run.
 
     Loss is plotted on top and accuracy at the bottom, with the random
-    baseline ``1 / num_classes``. The task ``label`` is included in the
-    file name to avoid collisions when several dictionaries are trained.
+    baseline ``1 / num_classes``.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -840,7 +843,7 @@ def save_train_curves(
     plt.title("Accuracy")
     plt.tight_layout()
 
-    path = out_dir / f"train_curv_{_safe_name(label)}_run_{run}.png"
+    path = out_dir / f"train_curv_run_{run}.png"
     plt.savefig(path, dpi=300, bbox_inches="tight")
     plt.close()
     return path
@@ -1202,50 +1205,85 @@ def train_one_run(
 # ============================================================
 # DATA PREPARATION (runs)
 # ============================================================
+def build_detection_model_map(crop_dir: Path) -> dict[str, str]:
+    """Map each detection folder to the name of its parent model folder.
+
+    Crop images are stored as ``crop_dir / model_name / detection / image``.
+    The model name is therefore the name of the parent directory of every
+    folder whose name is a ``detection`` value from ``images_df``.
+
+    Parameters
+    ----------
+    crop_dir:
+        Root crop directory.
+
+    Returns
+    -------
+    dict[str, str]
+        Mapping ``detection -> model_name``.
+    """
+    crop_dir = Path(crop_dir)
+    if not crop_dir.exists():
+        raise FileNotFoundError(f"Crop directory not found: {crop_dir}")
+
+    mapping: dict[str, str] = {}
+    for model_dir in crop_dir.iterdir():
+        if not model_dir.is_dir():
+            continue
+        for detection_dir in model_dir.iterdir():
+            if not detection_dir.is_dir():
+                continue
+            detection = detection_dir.name
+            if detection in mapping and mapping[detection] != model_dir.name:
+                warnings.warn(
+                    f"Detection {detection!r} found under several model "
+                    f"directories; keeping {mapping[detection]!r}."
+                )
+                continue
+            mapping[detection] = model_dir.name
+
+    return mapping
+
+
 def build_run_dataframe(
     images_df: pd.DataFrame,
     splits_df: pd.DataFrame,
     run,
-    label,
 ) -> pd.DataFrame:
-    """Assemble the images of one run for a dictionary key.
+    """Assemble the images of one run.
 
     Parameters
     ----------
     images_df:
-        Images table of the task. It must contain ``image``, ``indiv``,
-        ``event`` and ``label`` columns.
+        Images table. It must contain ``image``, ``indiv``, ``event``,
+        ``label`` and ``detection`` columns.
     splits_df:
-        Split table of the task (``event``, ``run``, ``split``).
+        Split table (``event``, ``run``, ``split``).
     run:
         Run identifier to keep.
-    label:
-        Key of the ``images_dfs``/``splits_dfs`` dictionaries. It is used
-        in error messages and to build the classification target
-        ``(indiv, label)``.
 
     Returns
     -------
     pandas.DataFrame
-        Images of the run with the additional ``split`` column and
-        ``image_label`` (the per-image sub-directory under
-        ``crop_dir / task``).
+        Images of the run with the additional ``split`` column.
     """
-    required = {"image", "indiv", "event", "label"}
+    required = {"image", "indiv", "event", "label", "detection"}
     missing = required - set(images_df.columns)
     if missing:
         raise ValueError(
-            f"images_df[{label!r}] is missing columns: "
-            f"{', '.join(sorted(missing))}."
+            f"images_df is missing columns: {', '.join(sorted(missing))}."
         )
 
     run_splits = splits_df[splits_df["run"] == run]
     if run_splits.empty:
-        raise ValueError(f"No split found for run {run!r} (label {label!r}).")
+        raise ValueError(f"No split found for run {run!r}.")
 
-    images = images_df.dropna(subset=["image", "indiv", "event"]).copy()
+    images = images_df.dropna(
+        subset=["image", "indiv", "event", "label", "detection"]
+    ).copy()
     images["image"] = images["image"].astype(str)
-    images["image_label"] = images["label"].astype(str)
+    images["label"] = images["label"].astype(str)
+    images["detection"] = images["detection"].astype(str)
 
     merged = images.merge(
         run_splits[["event", "split"]],
@@ -1256,11 +1294,7 @@ def build_run_dataframe(
     merged = merged.dropna(subset=["split"])
 
     if merged.empty:
-        raise ValueError(
-            f"No image for label {label!r} and run {run!r} "
-            f"(train={len(merged[merged['split'] == 'train'])}, "
-            f"val={len(merged[merged['split'] == 'val'])})."
-        )
+        raise ValueError(f"No image found for run {run!r}.")
 
     return merged.reset_index(drop=True)
 
@@ -1287,22 +1321,28 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
     set_seed(args.seed)
 
     # ------------------------------------------------------------
-    # TABLES (dictionaries keyed by task label)
+    # TABLES (single DataFrames)
     # ------------------------------------------------------------
-    splits_dfs = getattr(args, "splits_dfs", None)
-    images_dfs = getattr(args, "images_dfs", None)
-    if not splits_dfs or not images_dfs:
-        raise ValueError(
-            "run_training expects 'splits_dfs' and 'images_dfs' "
-            "dictionaries keyed by task label."
-        )
+    splits_df = getattr(args, "splits_df", None)
+    images_df = getattr(args, "images_df", None)
 
-    task_by_label = getattr(args, "task_by_label", None) or {}
+    # Fallback for command-line usage: read the tables from CSV files.
+    if splits_df is None and getattr(args, "split_file", None):
+        splits_df = pd.read_csv(args.split_file)
+    if images_df is None and getattr(args, "crop_file", None):
+        images_df = pd.read_csv(args.crop_file)
+
+    if splits_df is None or images_df is None:
+        raise ValueError(
+            "run_training expects 'splits_df' and 'images_df' DataFrames."
+        )
+    if splits_df.empty or images_df.empty:
+        raise ValueError("'splits_df' and 'images_df' must not be empty.")
 
     print(f"Feature extractor : {args.feature_extractor}")
     print(f"last_layer            : {args.last_layer}")
     print(f"last_frozen_layer     : {args.last_frozen_layer}")
-    print(f"Labels                : {', '.join(map(str, images_dfs))}")
+    print(f"Images                : {len(images_df)}")
     print(f"Device                : {device}")
 
     # ------------------------------------------------------------
@@ -1325,7 +1365,8 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
     # TRANSFORMATIONS
     # ------------------------------------------------------------
     augmentation = build_augmentation(
-        args.augmentation_params
+        args.augmentation_params,
+        getattr(args, "aug_params", None),
     )
 
     base_transform = build_input_transform(
@@ -1354,6 +1395,7 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
         print(f"Augmentation (epoch >= {args.aug_epoch}) : {augmentation}")
 
     crop_dir = Path(args.crop_path)
+    detection_model_map = build_detection_model_map(crop_dir)
 
     # ------------------------------------------------------------
     # RUNS
@@ -1362,280 +1404,269 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
     all_rows_early_stop: list[dict] = []
     summary_rows: list[dict] = []
 
-    for label, images_df in images_dfs.items():
-        if label not in splits_dfs:
-            warnings.warn(
-                f"No split found for label {label!r}: skipped."
+    runs = sorted(splits_df["run"].dropna().unique().tolist())
+    if args.limit_runs is not None:
+        runs = runs[: args.limit_runs]
+    if not runs:
+        raise ValueError("No run found in 'splits_df'.")
+
+    print(f"\nRuns : {len(runs)}")
+
+    for run in runs:
+        print(f"\n----- Run {run} -----")
+
+        started = time.time()
+
+        df = build_run_dataframe(images_df, splits_df, run)
+
+        # Resolve the model name from the parent of every detection folder.
+        missing_detections = sorted(
+            set(df["detection"]) - set(detection_model_map)
+        )
+        if missing_detections:
+            raise FileNotFoundError(
+                f"No model directory found under {crop_dir} for detection(s): "
+                f"{', '.join(missing_detections)}."
             )
-            continue
+        df["model_name"] = [
+            detection_model_map[detection] for detection in df["detection"]
+        ]
 
-        splits_df = splits_dfs[label]
-        task = task_by_label.get(label, label)
+        train_df = df[df["split"] == "train"].reset_index(drop=True)
+        val_df = df[df["split"] == "val"].reset_index(drop=True)
 
-        runs = sorted(splits_df["run"].dropna().unique().tolist())
-        if args.limit_runs is not None:
-            runs = runs[: args.limit_runs]
-        if not runs:
-            warnings.warn(f"No run found for label {label!r}: skipped.")
-            continue
+        if train_df.empty or val_df.empty:
+            raise ValueError(
+                f"Run {run!r}: empty train/val split "
+                f"(train={len(train_df)}, val={len(val_df)})."
+            )
 
-        print(
-            f"\n===== Label {label} (task {task}) : "
-            f"{len(runs)} run(s) ====="
+        # The classification target is the value of the `label` column of
+        # images_df.
+        class_names = sorted(df["label"].unique().tolist())
+        label_map = {name: idx for idx, name in enumerate(class_names)}
+        num_classes = len(class_names)
+
+        train_crop_ids = list(train_df["image"])
+        val_crop_ids = list(val_df["image"])
+        train_model_names = list(train_df["model_name"])
+        val_model_names = list(val_df["model_name"])
+        train_detections = list(train_df["detection"])
+        val_detections = list(val_df["detection"])
+
+        train_labels = torch.tensor(
+            [label_map[name] for name in train_df["label"]]
+        )
+        val_labels = torch.tensor(
+            [label_map[name] for name in val_df["label"]]
         )
 
-        for run in runs:
-            print(f"\n----- Label {label} / Run {run} -----")
+        # Validation metadata (image, individual, model, detection, ...).
+        metadata_columns = [
+            c
+            for c in (
+                "image",
+                "indiv",
+                "model_name",
+                "detection",
+                "label",
+                "event",
+                "split",
+            )
+            if c in val_df.columns
+        ]
+        val_metadata = val_df[metadata_columns].to_dict("records")
 
-            started = time.time()
+        print(
+            f"  Classes: {num_classes}, Train: {len(train_df)}, "
+            f"Val: {len(val_df)}"
+        )
 
-            df = build_run_dataframe(images_df, splits_df, run, label)
+        # ----------------------------------------------------
+        # Per-epoch training loader:
+        #   - epochs < aug_epoch: images without augmentation;
+        #   - epochs >= aug_epoch: images re-transformed at every
+        #     epoch by the DataLoader (on-the-fly augmentation).
+        # ----------------------------------------------------
+        shuffle_gen = torch.Generator().manual_seed(args.seed)
 
-            train_df = df[df["split"] == "train"].reset_index(drop=True)
-            val_df = df[df["split"] == "val"].reset_index(drop=True)
+        # Base-feature cache: computed ONLY once and used only while
+        # the backbone is frozen and augmentation is not active.
+        base_features_cache: dict = {}
 
-            if train_df.empty or val_df.empty:
-                raise ValueError(
-                    f"Label {label!r}, run {run!r}: empty train/val split "
-                    f"(train={len(train_df)}, val={len(val_df)})."
+        def get_base_features() -> torch.Tensor:
+            if "features" not in base_features_cache:
+                dataset = ImageCropDataset(
+                    crop_dir,
+                    train_crop_ids,
+                    train_labels,
+                    base_transform,
+                    model_names=train_model_names,
+                    detections=train_detections,
                 )
-
-            # The classification target is the pair (indiv, label), where
-            # `label` is the key of the images_dfs/splits_dfs dictionaries.
-            train_targets = [
-                (str(indiv), label) for indiv in train_df["indiv"]
-            ]
-            val_targets = [
-                (str(indiv), label) for indiv in val_df["indiv"]
-            ]
-
-            class_names = sorted(set(train_targets) | set(val_targets))
-            label_map = {
-                name: idx for idx, name in enumerate(class_names)
-            }
-            num_classes = len(class_names)
-
-            train_crop_ids = list(train_df["image"])
-            val_crop_ids = list(val_df["image"])
-            train_image_labels = list(train_df["image_label"])
-            val_image_labels = list(val_df["image_label"])
-
-            train_labels = torch.tensor(
-                [label_map[name] for name in train_targets]
-            )
-            val_labels = torch.tensor(
-                [label_map[name] for name in val_targets]
-            )
-
-            # Validation metadata (image, individual, per-image label, ...).
-            metadata_columns = [
-                c
-                for c in ("image", "indiv", "image_label", "event", "split")
-                if c in val_df.columns
-            ]
-            val_metadata = val_df[metadata_columns].to_dict("records")
-
-            print(
-                f"  Classes: {num_classes}, Train: {len(train_df)}, "
-                f"Val: {len(val_df)}"
-            )
-
-            # ----------------------------------------------------
-            # Per-epoch training loader:
-            #   - epochs < aug_epoch: images without augmentation;
-            #   - epochs >= aug_epoch: images re-transformed at every
-            #     epoch by the DataLoader (on-the-fly augmentation).
-            # ----------------------------------------------------
-            shuffle_gen = torch.Generator().manual_seed(args.seed)
-
-            # Base-feature cache: computed ONLY once and used only while
-            # the backbone is frozen and augmentation is not active.
-            base_features_cache: dict = {}
-
-            def get_base_features() -> torch.Tensor:
-                if "features" not in base_features_cache:
-                    dataset = ImageCropDataset(
-                        crop_dir,
-                        train_crop_ids,
-                        train_labels,
-                        base_transform,
-                        image_labels=train_image_labels,
-                        task=task,
-                    )
-                    base_features_cache["features"] = compute_features(
-                        feature_model,
-                        dataset,
-                        device,
-                        batch_size=args.batch_size,
-                        num_workers=args.num_workers,
-                    )
-                return base_features_cache["features"]
-
-            def make_train_loader(
-                epoch_1based: int, frozen: bool
-            ) -> DataLoader:
-                use_augmentation = (
-                    augmentation is not None
-                    and epoch_1based >= args.aug_epoch
-                )
-
-                if not use_augmentation and frozen:
-                    # Pre-computed features (backbone is frozen).
-                    dataset = TensorDataset(
-                        get_base_features(),
-                        train_labels,
-                    )
-                else:
-                    transform = (
-                        augmented_transform
-                        if use_augmentation
-                        else base_transform
-                    )
-                    dataset = ImageCropDataset(
-                        crop_dir,
-                        train_crop_ids,
-                        train_labels,
-                        transform,
-                        image_labels=train_image_labels,
-                        task=task,
-                    )
-
-                return DataLoader(
+                base_features_cache["features"] = compute_features(
+                    feature_model,
                     dataset,
-                    shuffle=True,
-                    generator=shuffle_gen,
+                    device,
                     batch_size=args.batch_size,
                     num_workers=args.num_workers,
-                    pin_memory=(device.type == "cuda"),
+                )
+            return base_features_cache["features"]
+
+        def make_train_loader(
+            epoch_1based: int, frozen: bool
+        ) -> DataLoader:
+            use_augmentation = (
+                augmentation is not None
+                and epoch_1based >= args.aug_epoch
+            )
+
+            if not use_augmentation and frozen:
+                # Pre-computed features (backbone is frozen).
+                dataset = TensorDataset(
+                    get_base_features(),
+                    train_labels,
+                )
+            else:
+                transform = (
+                    augmented_transform
+                    if use_augmentation
+                    else base_transform
+                )
+                dataset = ImageCropDataset(
+                    crop_dir,
+                    train_crop_ids,
+                    train_labels,
+                    transform,
+                    model_names=train_model_names,
+                    detections=train_detections,
                 )
 
-            val_dataset = ImageCropDataset(
-                crop_dir,
-                val_crop_ids,
-                val_labels,
-                base_transform,
-                image_labels=val_image_labels,
-                task=task,
-                metadata=val_metadata,
-            )
-
-            result = train_one_run(
-                args.seed,
-                make_train_loader,
-                feature_model,
-                val_dataset,
-                class_names,
-                num_classes,
-                dim_in,
-                device,
-                num_epoch=args.num_epoch,
+            return DataLoader(
+                dataset,
+                shuffle=True,
+                generator=shuffle_gen,
                 batch_size=args.batch_size,
-                lr=args.lr,
-                defreeze_epoch=args.defreeze_epoch,
+                num_workers=args.num_workers,
+                pin_memory=(device.type == "cuda"),
             )
 
-            train_error = result["train_error"]
-            val_error = result["val_error"]
-            train_accuracy = result["train_accuracy"]
-            val_accuracy = result["val_accuracy"]
-            epoch_val_predictions = result["epoch_val_predictions"]
+        val_dataset = ImageCropDataset(
+            crop_dir,
+            val_crop_ids,
+            val_labels,
+            base_transform,
+            model_names=val_model_names,
+            detections=val_detections,
+            metadata=val_metadata,
+        )
 
-            # ----------------------------------------------------
-            # TRAINING CURVES
-            # ----------------------------------------------------
-            curv_path = save_train_curves(
-                out_dir,
-                label,
-                run,
-                train_error,
-                val_error,
-                train_accuracy,
-                val_accuracy,
-                num_classes,
-            )
-            print(f"  Curves saved: {curv_path}")
+        result = train_one_run(
+            args.seed,
+            make_train_loader,
+            feature_model,
+            val_dataset,
+            class_names,
+            num_classes,
+            dim_in,
+            device,
+            num_epoch=args.num_epoch,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            defreeze_epoch=args.defreeze_epoch,
+        )
 
-            # ----------------------------------------------------
-            # MODEL WEIGHTS
-            # ----------------------------------------------------
-            model_path = (
-                model_dir / f"model_{_safe_name(label)}_run_{run}.pth"
-            )
-            torch.save(
-                {
-                    "backbone_state_dict": result["backbone_state_dict"],
-                    "head_state_dict": result["model_dict"],
-                    "class_names": class_names,
-                    "label": label,
-                    "task": task,
-                    "feature_extractor": args.feature_extractor,
-                    "last_layer": args.last_layer,
-                    "last_frozen_layer": args.last_frozen_layer,
-                    "num_epoch": args.num_epoch,
-                    "val_accuracy": val_accuracy[-1],
-                    "train_accuracy": train_accuracy[-1],
-                },
-                model_path,
-            )
-            print(f"  Weights saved: {model_path}")
+        train_error = result["train_error"]
+        val_error = result["val_error"]
+        train_accuracy = result["train_accuracy"]
+        val_accuracy = result["val_accuracy"]
+        epoch_val_predictions = result["epoch_val_predictions"]
 
-            # ----------------------------------------------------
-            # VALIDATION PREDICTIONS
-            # ----------------------------------------------------
-            last_epoch = len(epoch_val_predictions) - 1
-            last_rows = epoch_val_predictions[last_epoch]
+        # ----------------------------------------------------
+        # TRAINING CURVES
+        # ----------------------------------------------------
+        curv_path = save_train_curves(
+            out_dir,
+            run,
+            train_error,
+            val_error,
+            train_accuracy,
+            val_accuracy,
+            num_classes,
+        )
+        print(f"  Curves saved: {curv_path}")
 
-            stop_epoch = find_early_stop_epoch(
-                train_accuracy, args.early_stopping
-            )
-            stop_rows = epoch_val_predictions[stop_epoch]
+        # ----------------------------------------------------
+        # MODEL WEIGHTS
+        # ----------------------------------------------------
+        model_path = model_dir / f"model_run_{run}.pth"
+        detections = sorted(df["detection"].unique().tolist())
+        torch.save(
+            {
+                "backbone_state_dict": result["backbone_state_dict"],
+                "head_state_dict": result["model_dict"],
+                "class_names": class_names,
+                "detections": detections,
+                "feature_extractor": args.feature_extractor,
+                "last_layer": args.last_layer,
+                "last_frozen_layer": args.last_frozen_layer,
+                "num_epoch": args.num_epoch,
+                "val_accuracy": val_accuracy[-1],
+                "train_accuracy": train_accuracy[-1],
+            },
+            model_path,
+        )
+        print(f"  Weights saved: {model_path}")
 
-            for row in last_rows:
-                row["run"] = run
-                row["task"] = task
-                row["task_label"] = label
-            for row in stop_rows:
-                row["run"] = run
-                row["task"] = task
-                row["task_label"] = label
+        # ----------------------------------------------------
+        # VALIDATION PREDICTIONS
+        # ----------------------------------------------------
+        last_epoch = len(epoch_val_predictions) - 1
+        last_rows = epoch_val_predictions[last_epoch]
 
-            all_rows_last_epoch.extend(last_rows)
-            all_rows_early_stop.extend(stop_rows)
+        stop_epoch = find_early_stop_epoch(
+            train_accuracy, args.early_stopping
+        )
+        stop_rows = epoch_val_predictions[stop_epoch]
 
-            # One prediction file per (label, run).
-            run_pred_df = build_val_pred_df(last_rows)
-            run_pred_path = (
-                out_dir
-                / f"val_pred_{_safe_name(label)}_run_{run}.csv"
-            )
-            run_pred_df.to_csv(run_pred_path, index=False)
+        for row in last_rows:
+            row["run"] = run
+        for row in stop_rows:
+            row["run"] = run
 
-            best_epoch = int(np.argmax(val_accuracy))
+        all_rows_last_epoch.extend(last_rows)
+        all_rows_early_stop.extend(stop_rows)
 
-            summary_rows.append(
-                {
-                    "label": label,
-                    "task": task,
-                    "run": run,
-                    "num_classes": num_classes,
-                    "num_train": len(train_df),
-                    "num_val": len(val_df),
-                    "train_acc": round(train_accuracy[stop_epoch], 2),
-                    "val_acc": round(val_accuracy[stop_epoch], 2),
-                    "best_val_acc": round(val_accuracy[best_epoch], 2),
-                    "best_epoch": best_epoch + 1,
-                    "train_loss": round(train_error[stop_epoch], 4),
-                    "val_loss": round(val_error[stop_epoch], 4),
-                    "early_stop_epoch": stop_epoch + 1,
-                    "duration_s": round(time.time() - started, 1),
-                }
-            )
+        # One prediction file per run.
+        run_pred_df = build_val_pred_df(last_rows)
+        run_pred_path = out_dir / f"val_pred_run_{run}.csv"
+        run_pred_df.to_csv(run_pred_path, index=False)
 
-            print(
-                f"  Train acc : {train_accuracy[-1]:.2f}% | "
-                f"Val acc : {val_accuracy[-1]:.2f}% | "
-                f"simulated stop epoch {stop_epoch + 1}"
-            )
+        best_epoch = int(np.argmax(val_accuracy))
+
+        summary_rows.append(
+            {
+                "run": run,
+                "detections": ", ".join(detections),
+                "num_classes": num_classes,
+                "num_train": len(train_df),
+                "num_val": len(val_df),
+                "train_acc": round(train_accuracy[stop_epoch], 2),
+                "val_acc": round(val_accuracy[stop_epoch], 2),
+                "best_val_acc": round(val_accuracy[best_epoch], 2),
+                "best_epoch": best_epoch + 1,
+                "train_loss": round(train_error[stop_epoch], 4),
+                "val_loss": round(val_error[stop_epoch], 4),
+                "early_stop_epoch": stop_epoch + 1,
+                "duration_s": round(time.time() - started, 1),
+            }
+        )
+
+        print(
+            f"  Train acc : {train_accuracy[-1]:.2f}% | "
+            f"Val acc : {val_accuracy[-1]:.2f}% | "
+            f"simulated stop epoch {stop_epoch + 1}"
+        )
 
     # ============================================================
     # FINAL SAVE
@@ -1662,26 +1693,26 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
 # Columns of val_pred.csv, in the requested order.
 VAL_PRED_COLUMNS = [
     "run",
-    "task",
-    "task_label",
+    "model_name",
+    "detection",
     "image",
-    "image_label",
     "video",
+    "indiv",
     "label",
     "pred_label",
     "margin",
     "logits",
     "conf",
-    "indiv_name",
 ]
 
 
 def build_val_pred_df(rows: list[dict]) -> pd.DataFrame:
     """Build the validation-prediction DataFrame.
 
-    Columns: run, task, task_label, image, image_label, video, label,
+    Columns: run, model_name, detection, image, video, indiv, label,
     pred_label, margin, logits, conf. ``indiv_name`` is kept as an alias
-    for ``label`` for compatibility with existing analysis scripts.
+    for ``indiv`` (or ``label`` when ``indiv`` is absent) for compatibility
+    with existing analysis scripts.
     """
     df = pd.DataFrame(rows)
 
@@ -1690,15 +1721,6 @@ def build_val_pred_df(rows: list[dict]) -> pd.DataFrame:
 
     if "conf" not in df.columns and "conf_pred_label" in df.columns:
         df["conf"] = df["conf_pred_label"]
-
-    if "label" not in df.columns and "indiv" in df.columns:
-        df["label"] = df["indiv"]
-
-    if "indiv_name" not in df.columns:
-        if "indiv" in df.columns:
-            df["indiv_name"] = df["indiv"]
-        elif "label" in df.columns:
-            df["indiv_name"] = df["label"]
 
     for column in VAL_PRED_COLUMNS:
         if column not in df.columns:
@@ -1792,9 +1814,7 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
 
     training = config.get("training_parameters", {}) or {}
     augmentation = config.get("data_augmentation", {}) or {}
-    transformation = (
-        augmentation.get("data_transformation", {}) or {}
-    )
+    transformation = augmentation.get("torch_transformation")
     extractor_params = config.get("feature_extractor_params", {}) or {}
 
     if args.feature_extractor is None:
@@ -1827,7 +1847,9 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
         args.device = training.get("device")
 
     if getattr(args, "augmentation_params", None) is None:
-        args.augmentation_params = transformation.get("params", {}) or {}
+        args.augmentation_params = transformation
+    if getattr(args, "aug_params", None) is None:
+        args.aug_params = augmentation.get("aug_params") or {}
     if getattr(args, "preprocessing_function", None) is None:
         args.preprocessing_function = config.get("preprocessing_function")
     if getattr(args, "transform_params", None) is None:

@@ -32,7 +32,7 @@ import os
 from IPython.core.magics import script
 
 #DETECTION CHOICES
-DETECT_CHOICES = ['ear_seg','head_detect','ear_detect'] #
+DETECT_CHOICES = ['ear_seg','body_detect'] #'ear_seg','body_detect','ear_detect', 'head_detect'
 
 #DEFAULT PARAMETERS FOR CHOICES
 DETECT_PARAMS = {}
@@ -45,6 +45,17 @@ for choice in DETECT_CHOICES:
         DETECT_PARAMS["MDV6-yolov10-e"] ={"conf":0.1,'labels_to_keep':[choice]}
     elif choice =="ear_seg":
         DETECT_PARAMS["seg_ears_lr_v2"] = {"conf":0.1,'labels_to_keep':[choice]}
+
+# Data-augmentation flags: only transformations set to True are applied.
+# The matching parameters are read from
+# `data_augmentation.torch_transformation.params` in pipeline.yaml.
+AUG_PARAMS = {
+    "rotation": True,
+    "translation": True,
+    "scaling": True,
+    "saturation": True,
+    "hue": True,
+}
 
 
 EXPERIMENT_COLUMNS = [
@@ -194,16 +205,34 @@ def get_existing_version(df: pd.DataFrame, row: dict) -> str | None:
 def describe_augmentation(config: dict) -> str:
     """Décrit l'augmentation de données de l'expérience (colonne CSV)."""
     augmentation = config.get("data_augmentation", {}) or {}
-    params = (
-        (augmentation.get("data_transformation", {}) or {}).get("params", {})
-        or {}
-    )
+    params = augmentation.get("torch_transformation")
     training = config.get("training_parameters", {}) or {}
 
     names = []
-    if params.get("affine"):
+    affine = params.get("affine") or {}
+    affine_enabled = any(
+        AUG_PARAMS.get(flag, True)
+        for key, flag in (
+            ("degrees", "rotation"),
+            ("translate", "translation"),
+            ("scale", "scaling"),
+        )
+        if key in affine
+    )
+    if affine_enabled:
         names.append("RandomAffine")
-    if params.get("colorjitter"):
+    jitter = (
+        params.get("colorjitter")
+        or params.get("colorjittering")
+        or params.get("color_jitter")
+        or {}
+    )
+    jitter_enabled = any(
+        AUG_PARAMS.get(flag, True)
+        for key, flag in (("saturation", "saturation"), ("hue", "hue"))
+        if key in jitter
+    )
+    if jitter_enabled:
         names.append("ColorJitter")
 
     if not names:
@@ -293,6 +322,7 @@ def build_training_args(
         limit_runs=None,
         batch_norm_only=None,
         augmentation_params=None,
+        aug_params=AUG_PARAMS,
         preprocessing_function=None,
         transform_params=None,
     )
@@ -301,14 +331,15 @@ def build_training_args(
 
 
 def check_inputs(args: argparse.Namespace) -> None:
-    """Check that crop directory and split/image dictionaries exist."""
+    """Check that the crop directory and split/image DataFrames exist."""
     missing = []
     crop_path = getattr(args, "crop_path", None)
     if not crop_path or not Path(crop_path).exists():
         missing.append(f"crop_path: {crop_path}")
 
-    for name in ("images_dfs", "splits_dfs"):
-        if not getattr(args, name, None):
+    for name in ("images_df", "splits_df"):
+        value = getattr(args, name, None)
+        if value is None or value.empty:
             missing.append(name)
 
     if missing:
@@ -436,6 +467,7 @@ def main(argv: list[str] | None = None) -> None:
                 max_ratio = filter["max_ratio"]
                 crops_file = crops_dir / f"{model.split(".")[0]}.csv"
                 df = pd.read_csv(crops_file)
+                df = df[~df.indiv.isna()]
                 df = df[(df.conf >= conf) & (df.area >= min_area)]
                 if min_ratio:
                     df = df[df.ratio >= min_ratio]
@@ -448,7 +480,7 @@ def main(argv: list[str] | None = None) -> None:
                             filter_script = importlib.import_module(
                                 f"detection_filters.{script_name}"
                             )
-                            df = filter_script.main(selected_dfs[label], crops_dir, model)
+                            df = filter_script.main(df, crops_dir, model)
                 df['label'] = df["indiv"] + "_" + label  # vrai séparation gauche droite pour oreille?
                 selected_dfs.append(df)
         selected_df = pd.concat(selected_dfs)
@@ -469,10 +501,10 @@ def main(argv: list[str] | None = None) -> None:
     # ------------------------------------------------------------
     args = build_training_args(config, config_dir, results_dir)
 
-    # The training script consumes the split/image dictionaries directly.
+    # The training script consumes the split/image DataFrames directly.
     args.crop_path = str(crops_dir)
-    args.splits_dfs = splits_dfs
-    args.images_dfs = images_dfs
+    args.splits_df = splits_df
+    args.images_df = images_df
 
     check_inputs(args)
 
