@@ -22,12 +22,34 @@ import pandas as pd
 # Greedy split configuration
 DEFAULT_max_runs = 100
 
-def next_split_version(split_dir: Path) -> tuple[str, Path]:
-    """Next split version for a label
-    """
-    versions = [int(file.stem[1:]) for file in split_dir.glob(".csv")]
+def next_split_version(split_versions: Path, row: dict) -> tuple[str, Path] | None:
+    """Generate the next split version and append its metadata."""
+
+    if not row:
+        return None
+
+    split_versions.parent.mkdir(parents=True, exist_ok=True)
+
+    versions = [
+        int(file.stem[1:])
+        for file in split_versions.parent.glob("v*.csv")
+        if file.stem[1:].isdigit()
+    ]
+
     version = f"v{max(versions) + 1 if versions else 1}"
-    return version
+
+    split_file = split_versions
+
+    row["version"] = version
+
+    pd.DataFrame([row]).to_csv(
+        split_file,
+        mode="a",
+        header=not split_file.exists(),
+        index=False,
+    )
+
+    return version, split_file
 
 
 def _assign_event_by_period(clips_dataframe: pd.DataFrame, period: str) -> pd.Series:
@@ -439,7 +461,10 @@ def main(params: Dict[str, Any]) -> None:
     train_ratio = params["train_ratio"]
     min_crop_per_indiv_for_val = params["min_crop_per_indiv_for_val"]
     database_path = params["video_database"]
-    split_dir = params["split_dir"]
+    split_versions = params["split_versions"]
+    split_metadata = params["metadata"]
+    version = next_split_version(split_versions,split_metadata)
+
     force_val = params.get("force_val")
     crops_count_df = images_df.groupby(['indiv'])['image'].nunique().reset_index(name='nb_crops')
 
@@ -482,8 +507,8 @@ def main(params: Dict[str, Any]) -> None:
         )
 
     images_df = images_df.merge(videos_with_event[["video","event"]],on="video", how="inner").drop(columns="video")
-    images_df.to_csv(split_dir / label / f"selected_images_{event}_{max_runs}_{train_ratio}_{min_crop_per_indiv_for_val}_{force_val}.csv", index=False)
+    images_df.to_csv(split_versions.parent / f"{version}_selected_images.csv", index=False)
     splits_df.to_csv(
-        split_dir / label / f"splits_{event}_{max_runs}_{train_ratio}_{min_crop_per_indiv_for_val}_{force_val}.csv",
+        split_versions.parent / f"{version}_splits.csv",
         index=False)
     return splits_df, images_df

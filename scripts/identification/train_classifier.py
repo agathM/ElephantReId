@@ -154,7 +154,7 @@ ARCHITECTURES: dict[str, dict] = {
         "mean": IMAGENET_MEAN,
         "std": IMAGENET_STD,
         "default_last_layer": "norm",
-        "default_last_frozen_layer": "layers",
+        "default_last_frozen_layer": "norm",
         "default_batch_norm_only": False
     },
     "MiewID": {
@@ -183,26 +183,6 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-# ============================================================
-# PRETRAITEMENT / AUGMENTATION
-# ============================================================
-LUMINANCE = np.array([0.299, 0.587, 0.114])
-
-
-def transform_brightness_normalized(image: Image.Image, target_mean: float = 0.5):
-    """Normalise la luminosité moyenne de l'image (Rec. 601)."""
-    array = np.asarray(image).astype(np.float32) / 255.0
-
-    luminance = array @ LUMINANCE
-    current_mean = luminance.mean()
-
-    if current_mean == 0:
-        return image
-
-    factor = target_mean / current_mean
-    normalized = np.clip(array * factor, 0, 1)
-
-    return Image.fromarray((normalized * 255).astype(np.uint8))
 
 
 # Prétraitements disponibles (nom -> fonction). `None` = pas de prétraitement.
@@ -1276,7 +1256,7 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
     )
 
     base_transform = build_input_transform(
-        args.transform_function,
+        args.preprocessing_function,
         args.transform_params,
         None,
         backbone.input_size,
@@ -1286,7 +1266,7 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
     )
 
     augmented_transform = build_input_transform(
-        args.transform_function,
+        args.preprocessing_function,
         args.transform_params,
         augmentation,
         backbone.input_size,
@@ -1711,8 +1691,8 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
 
     if getattr(args, "augmentation_params", None) is None:
         args.augmentation_params = transformation.get("params", {}) or {}
-    if getattr(args, "transform_function", None) is None:
-        args.transform_function = config.get("transform_function")
+    if getattr(args, "preprocessing_function", None) is None:
+        args.preprocessing_function = config.get("preprocessing_function")
     if getattr(args, "transform_params", None) is None:
         args.transform_params = config.get("params", {}) or {}
 

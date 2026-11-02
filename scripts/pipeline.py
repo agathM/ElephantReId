@@ -176,6 +176,17 @@ def copy_config_files(
     return copied
 
 
+def get_existing_version(df: pd.DataFrame, row: dict) -> str | None:
+    """Return the version if a matching row exists, otherwise None."""
+
+    mask = df[list(row.keys())].eq(pd.Series(row)).all(axis=1)
+
+    if mask.any():
+        return df.loc[mask, "version"].iloc[0]
+
+    return None
+
+
 # ============================================================
 # TABLEAU RÉCAPITULATIF DES EXPÉRIENCES
 # ============================================================
@@ -280,7 +291,7 @@ def build_training_args(
         device=None,
         limit_runs=None,
         augmentation_params=None,
-        transform_function=None,
+        preprocessing_function=None,
         transform_params=None,
     )
 
@@ -325,7 +336,9 @@ def main(argv: list[str] | None = None) -> None:
 
     config = load_config(config_dir)
 
-    home_dir = config['home_dir']
+    home_dir = Path(config['home_dir'])
+    split_dir = Path(config['home_dir']) / config['split_dir']
+    split_versions = config["split_versions"]
     frame_database = config["frame_database"]
     dataset_date = config["dataset_date"]
     paths = config.get("paths", {}) or {}
@@ -388,7 +401,10 @@ def main(argv: list[str] | None = None) -> None:
     for model in DETECT_PARAMS:
         for label in DETECT_PARAMS[model]["labels_to_keep"]:
             filter = filters[label]
-            split_metadata = split_config + filters[label]
+            split_metadata = split_config | filters[label]
+            split_metadata_df = pd.read_csv(split_dir / label / split_versions)
+            if get_existing_version(split_metadata_df,split_metadata):
+                continue
             conf = filter["conf"]
             min_area = filter["min_area"]
             min_ratio = filter["min_ratio"]
@@ -413,13 +429,20 @@ def main(argv: list[str] | None = None) -> None:
     splits_dfs = {}
     images_dfs = {}
     split_config["video_database"] = Path(config["home_dir"]) / config["video_database"]
-    split_config["split_dir"] = Path(config["home_dir"]) / config["split_dir"]
     import scripts.identification.split as split
     for label in selected_dfs:
         split_config['images_df'] = selected_dfs[label]
         split_config['label'] = label
-        split_metadata = split_config + filters[label]
-        splits_df, images_df = split.main(split_config)
+        split_metadata = split_config | filters[label]
+        split_metadata_df = pd.read_csv(split_dir / label / split_versions)
+        version =  get_existing_version(split_metadata_df, split_metadata)
+        if version:
+            splits_df = pd.read_csv(split_dir / label / f"{version}_splits.csv")
+            images_df = pd.read_csv(split_dir / label / f"{version}_selected_images.csv")
+        else:
+            split_config["metadata"] = split_metadata
+            split_config["split_versions"] = split_dir / label / split_versions
+            splits_df, images_df = split.main(split_config)
         images_dfs[label] = images_df
         splits_dfs[label] = splits_df
         print(splits_df.head())

@@ -5,6 +5,7 @@ frame_database: "frame_database.csv" #base de données avec soit indiv unique su
 home_dir: "/home/agath/Documents/MNHN/code"#"/sps/mnhn/ameurisse/ElephantReId"
 crops_dir: "data/processed/crops"        # dossier des images de crops
 split_dir: "data/processed/crops/split_files"  # table des splits (run, split)
+split_versions: "splits_metadata.csv"
 
 #DETECTIONS PARAMETERS
 detection:
@@ -63,7 +64,7 @@ split:
     force_val: True #if an indiv appears in more than 2 events at least one in val
 
 # Image preprocessing
-transform_function: "brightness_normalized" #choose function from src.identification.preprocessing or None
+preprocessing_function: "brightness_normalized" #choose function from image_preprocessing or None
 
 # Data augmentation
 data_augmentation:
