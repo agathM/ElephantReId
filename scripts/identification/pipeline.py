@@ -28,11 +28,13 @@ import pandas as pd
 import yaml
 import train_classifier, detect_and_track
 import os
+import pdb
 
 from IPython.core.magics import script
 
 #DETECTION CHOICES
 DETECT_CHOICES = ['ear_seg','body_detect'] #'ear_seg','body_detect','ear_detect', 'head_detect'
+MODE = ["Day","Night"]
 
 #DEFAULT PARAMETERS FOR CHOICES
 DETECT_PARAMS = {}
@@ -62,6 +64,7 @@ EXPERIMENT_COLUMNS = [
     "version",
     "dataset_date",
     "detection_model",
+    "mode",
     "split_method",
     "architecture",
     "data_augmentation",
@@ -92,7 +95,7 @@ def next_results_dir(results_root: Path) -> tuple[str, Path]:
 
     def contains_any_file(folder):
         """Return True if the folder or any subfolder contains at least one file."""
-        return any((p.is_file() and p.suffix != ".yaml") for p in Path(folder).rglob("*"))
+        return any((p.is_file() and p.suffix != ".yaml") for p in Path(folder).glob("*"))
     versions = []
     if results_root.exists():
         for child in results_root.iterdir():
@@ -300,7 +303,7 @@ def build_training_args(
     )
 
     args = argparse.Namespace(
-        config=str(config_path),
+        config=str(Path(config_path) / "pipeline.yaml"),
         feature_extractor=None,
         last_layer=None,
         last_frozen_layer=None,
@@ -412,13 +415,15 @@ def main(argv: list[str] | None = None) -> None:
     for path in copied:
         print(f"  - {path.name}")
     crops_dir = Path(config["home_dir"]) / config["crops_dir"]
+    video_database_df = pd.read_csv(Path(config["home_dir"]) / config["video_database"])
+    video_database_df = video_database_df[video_database_df["mode"].isin(MODE)]
     # DETECTIONS
     detection = config["detection"]
     detection['crops_dir'] = config["crops_dir"]
     detection['home_dir'] = home_dir
     detection["split_dir"] = Path(config["home_dir"]) / config["split_dir"]
     detection['frame_database'] = frame_database
-    detection['video_database'] = config["video_database"]
+    detection['video_database'] = video_database_df
     print("Detections")
     import detect_and_track as detect
     for model in DETECT_PARAMS:
@@ -485,17 +490,17 @@ def main(argv: list[str] | None = None) -> None:
                 selected_dfs.append(df)
         selected_df = pd.concat(selected_dfs)
         #GENERATE SPLIT OVER ALL DETECTIONS
-        split_config["video_database"] = Path(config["home_dir"]) / config["video_database"]
+        print("GENERATE NEW SPLIT")
+        split_config["video_database"] = video_database_df
         import split as split
         split_config['images_df'] = selected_df
         split_config["metadata"] = split_metadata
         split_config["split_versions"] = split_dir / split_versions
-        splits_df, images_df = split.main(split_config)
+        splits_df, images_df, split_version = split.main(split_config)
         print(splits_df.head())
         print(images_df.head())
     splits_df.to_csv(results_dir / "input_metadata" / f"{split_version}_splits.csv")
     images_df.to_csv(results_dir / "input_metadata" / f"{split_version}_selected_images.csv")
-    """
     # ------------------------------------------------------------
     # 2) TRAINING
     # ------------------------------------------------------------
@@ -531,6 +536,7 @@ def main(argv: list[str] | None = None) -> None:
             "version": version,
             "dataset_date": config.get("dataset_date", ""),
             "detection_model": config.get("detection_model", ""),
+            "mode": MODE,
             "split_method": (
                 (config.get("split", {}) or {}).get("split_method", "")
             ),
@@ -546,7 +552,7 @@ def main(argv: list[str] | None = None) -> None:
     experiments_path = results_root / EXPERIMENTS_CSV_NAME
     df = update_experiment_df(experiments_path, [row])
     print(f"\nTableau des expériences : {experiments_path}")
-    print(df.to_string(index=False))"""
+    print(df.to_string(index=False))
 
 
 if __name__ == "__main__":

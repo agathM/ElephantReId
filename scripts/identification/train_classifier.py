@@ -27,9 +27,10 @@ ou, depuis `pipeline.py`, via `run_training(args)`.
 SORTIES (dans `--out-dir`)
 --------------------------
     train_curv_run_<run>.png   courbes loss / accuracy du run
-    val_pred.csv               prédictions de validation (dernière epoch)
-    val_pred_early_stop.csv    prédictions à l'epoch d'arrêt simulée
-    val_pred_run_<run>.csv     prédictions du run (dernière epoch)
+    val_pred.csv               prédictions de validation (dernière epoch),
+                               complétées après chaque run (append)
+    val_pred_early_stop.csv    prédictions à l'epoch d'arrêt simulée,
+                               complétées après chaque run (append)
     runs_summary.csv           métriques par run (train_acc, val_acc, ...)
 """
 
@@ -53,6 +54,7 @@ import torch.nn as nn
 import yaml
 
 import matplotlib
+from kornia.models.rt_detr import architecture
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -132,8 +134,6 @@ LAYER_MAPPING: dict[str, dict[str, dict[str, str]]] = {
 # REGISTRE DES EXTRACTEURS DE FEATURES
 # ------------------------------------------------------------
 # input_size / mean / std : prétraitement attendu par chaque modèle.
-# classification_layer : module de classification d'origine (remplacé par
-# la ClassificationHead : ses poids ne sont donc jamais entraînés).
 # ============================================================
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -142,6 +142,14 @@ MIEWID_STD = (0.5,0.5,0.5)
 
 ARCHITECTURES: dict[str, dict] = {
     "ResNet152": {
+        "input_size": 224,
+        "mean": IMAGENET_MEAN,
+        "std": IMAGENET_STD,
+        "default_last_layer": "avgpool",
+        "default_last_frozen_layer": "layer3",
+        "default_batch_norm_only": False
+    },
+    "ResNet50": {
         "input_size": 224,
         "mean": IMAGENET_MEAN,
         "std": IMAGENET_STD,
@@ -484,7 +492,6 @@ class Backbone:
     padding: int
     mean: tuple
     std: tuple
-    classification_layer: str
     children: list
 
 
@@ -537,7 +544,6 @@ def build_backbone(name: str, pretrained: bool = True) -> Backbone:
         padding=spec.get("padding", None),
         mean=spec["mean"],
         std=spec["std"],
-        classification_layer=spec["classification_layer"],
         children=list(model.named_children()),
     )
 
@@ -624,7 +630,7 @@ class FeatureModel(nn.Module):
         self.last_layer = last_layer
         self.last_frozen_layer = last_frozen_layer
         self.batch_norm_only = True
-        valid_layers = [n for n,_ in self.model.named_parameters()]
+        valid_layers = [n for n,_ in self.model.named_modules()]
         if last_layer not in valid_layers:
             raise KeyError(
                 f"last_layer '{last_layer}' inconnu pour "
@@ -715,6 +721,7 @@ class FeatureModel(nn.Module):
             if parent and parent in in_range: #si parent est dans in_range pas besoin de l'ajouter car le parent couvre les enfants
                 continue
             selected.append((path, key))
+        print(selected)
 
         selected.sort(key=lambda item: item[1]) #trie par ordre croissant
 
@@ -782,29 +789,6 @@ class FeatureModel(nn.Module):
 # ============================================================
 # ENTRAÎNEMENT
 # ============================================================
-def find_early_stop_epoch(
-    train_accuracies: list,
-    min_acc_improvement: float,
-) -> int:
-    """Indice de l'epoch (0-based) où l'early stopping se serait déclenché.
-
-    On se serait arrêté à la première epoch `e` (e >= 1) dont l'amélioration
-    d'accuracy train par rapport à l'epoch précédente est strictement
-    inférieure à `min_acc_improvement` %. Si aucun seuil ne déclenche
-    l'arrêt, on retourne l'indice de la dernière epoch.
-    Pour éviter le surentrainement sur la validation en l'absence de jeu de test
-    """
-    for epoch in range(1, len(train_accuracies)):
-        if train_accuracies[epoch - 1] > 0:
-            improvement = (
-                (train_accuracies[epoch] - train_accuracies[epoch - 1])
-                / train_accuracies[epoch - 1]
-                * 100
-            )
-            if improvement < min_acc_improvement:
-                return epoch
-    return len(train_accuracies) - 1
-
 
 def save_train_curves(
     out_dir: Path,
@@ -856,11 +840,8 @@ def compute_features(
     batch_size: int = 64,
     num_workers: int = 0,
 ) -> torch.Tensor:
-    """Calcule les features d'un dataset (images -> vecteurs).
+    """Extract features from a dataset without accumulating batch tensors."""
 
-    Le backbone est mis en mode eval et aucun gradient n'est calculé :
-    les features sont donc déterministes et réutilisables.
-    """
     backbone.set_mode(False)
 
     loader = DataLoader(
@@ -870,16 +851,30 @@ def compute_features(
         num_workers=num_workers,
     )
 
-    features = []
+    if len(dataset) == 0:
+        return torch.empty((0, backbone.feature_dim))
+
+    features = None
+    offset = 0
+
     with torch.no_grad():
         for batch, _ in loader:
             batch = batch.to(device, non_blocking=True)
-            features.append(backbone(batch).cpu())
+            batch_features = backbone(batch).cpu()
 
-    if not features:
-        return torch.zeros(0)
+            if features is None:
+                features = torch.empty(
+                    (len(dataset), *batch_features.shape[1:]),
+                    dtype=batch_features.dtype,
+                )
 
-    return torch.cat(features, dim=0)
+            end = offset + len(batch_features)
+            features[offset:end] = batch_features
+            offset = end
+
+            del batch, batch_features
+
+    return features
 
 
 def train_one_run(
@@ -895,6 +890,7 @@ def train_one_run(
     batch_size: int = 64,
     lr: float = 1e-3,
     defreeze_epoch: int | None = None,
+    min_acc_improvement: float = 1.0,
 ):
     """Entraîne la tête de classification (et éventuellement le backbone).
 
@@ -909,21 +905,27 @@ def train_one_run(
           est fine-tuné (sinon les features seraient obsolètes).
 
     L'entraînement parcourt TOUJOURS tous les epochs (num_epoch), sans
-    early stopping : les courbes et les prédictions de validation de chaque
-    epoch sont collectées pour décider après coup des points de sauvegarde.
+    early stopping : les courbes sont collectées pour décider après coup des
+    points de sauvegarde. Pour limiter la mémoire, les prédictions de
+    validation ne sont matérialisées que pour deux epochs au plus :
+    l'epoch d'arrêt simulée (première epoch dont l'amélioration d'accuracy
+    train passe sous `min_acc_improvement`) et la dernière epoch.
 
     Returns
     -------
     dict
         - train_error / val_error : list[float] (loss par epoch)
         - train_accuracy / val_accuracy : list[float] (accuracy % par epoch)
-        - epoch_val_predictions : dict[int, list[dict]]
-            Prédictions de validation (rows prêtes pour val_pred.csv) par
-            indice d'epoch (0-based).
+        - last_epoch_predictions : list[dict]
+            Prédictions de validation (rows prêtes pour val_pred.csv) de la
+            dernière epoch.
+        - early_stop_predictions : list[dict]
+            Prédictions de validation de l'epoch d'arrêt simulée (ou de la
+            dernière epoch si aucun arrêt n'est déclenché).
     """
 
     set_seed(seed)
-
+    stop_epoch = None
     head = ClassificationHead(
         dim_out=num_classes,
         dim_in=dim_in,
@@ -940,6 +942,7 @@ def train_one_run(
     # sont simplement inactives (requires_grad=False) tant que l'epoch de
     # dégel n'est pas atteinte.
     parameters = list(head.parameters()) + list(backbone.trainable_parameters)
+    print(parameters)
 
     optimizer = torch.optim.Adam(
         parameters,
@@ -966,8 +969,10 @@ def train_one_run(
     train_accuracy = []
     val_accuracy = []
 
-    # Prédictions de validation par epoch {epoch_index: [rows]}
-    epoch_val_predictions = {}
+    # Seules les prédictions de l'epoch d'arrêt simulée et de la dernière
+    # epoch sont conservées (les autres sont jetées après la validation).
+    last_epoch_predictions = None
+    early_stop_predictions = None
 
     for epoch in range(num_epoch):
 
@@ -976,9 +981,9 @@ def train_one_run(
         # ====================================================
 
         # Dégel des couches fine-tunées à partir de defreeze_epoch
-        # (1-based). `None` => fine-tuning dès la première epoch.
+        # (1-based). `None` => pas de fine-tuning
         if defreeze_epoch is None:
-            backbone.set_trainable(True)
+            backbone.set_trainable(False)
         else:
             backbone.set_trainable((epoch + 1) >= defreeze_epoch)
 
@@ -1048,7 +1053,24 @@ def train_one_run(
         error = 0.0
         corrects = 0
 
-        val_prediction_rows = []
+        # Décide si les prédictions de CETTE epoch doivent être conservées.
+        # Seules l'epoch d'arrêt simulée et la dernière epoch sont gardées :
+        # les rows des autres epochs sont inutiles et coûteux en mémoire.
+        is_stop_epoch = False
+        if early_stop_predictions is None and len(train_accuracy) >= 2:
+            previous_acc = train_accuracy[-2]
+            current_acc = train_accuracy[-1]
+
+            if previous_acc > 0:
+                improvement = (
+                    (current_acc - previous_acc) / previous_acc * 100
+                )
+                is_stop_epoch = improvement < min_acc_improvement
+
+        is_last_epoch = epoch == num_epoch - 1
+        keep_predictions = is_last_epoch or is_stop_epoch
+
+        val_prediction_rows = [] if keep_predictions else None
 
         val_needs_backbone = getattr(
             val_dataset, "needs_backbone", False
@@ -1073,11 +1095,6 @@ def train_one_run(
 
                 error += loss.item()
 
-                probabilities = torch.softmax(
-                    output,
-                    dim=1,
-                )
-
                 predicted = torch.argmax(
                     output,
                     dim=1,
@@ -1087,9 +1104,17 @@ def train_one_run(
                     predicted == label
                 ).sum().item()
 
+                if not keep_predictions:
+                    continue
+
                 # --------------------------------------------
                 # Save predictions for this epoch
                 # --------------------------------------------
+
+                probabilities = torch.softmax(
+                    output,
+                    dim=1,
+                )
 
                 logits = output.cpu()
                 predicted_cpu = predicted.cpu()
@@ -1186,17 +1211,31 @@ def train_one_run(
 
         scheduler.step(error)
 
-        # On conserve les prédictions de validation de CETTE epoch
-        # pour pouvoir générer val_pred.csv à n'importe quel point
-        # d'arrêt (early stopping simulé a posteriori).
-        epoch_val_predictions[epoch] = val_prediction_rows
+        # On ne conserve que les prédictions de l'epoch d'arrêt simulée et
+        # celles de la dernière epoch.
+        if is_stop_epoch:
+            early_stop_predictions = val_prediction_rows
+            stop_epoch = epoch
+        if is_last_epoch:
+            last_epoch_predictions = val_prediction_rows
+
+    # Si aucun arrêt n'a été déclenché, l'arrêt simulé correspond à la
+    # dernière epoch.
+    if stop_epoch is None:
+        stop_epoch = len(train_accuracy) - 1
 
     return {
         "train_error": train_error,
         "val_error": val_error,
         "train_accuracy": train_accuracy,
         "val_accuracy": val_accuracy,
-        "epoch_val_predictions": epoch_val_predictions,
+        "last_epoch_predictions": last_epoch_predictions,
+        "early_stop_predictions": (
+            early_stop_predictions
+            if early_stop_predictions is not None
+            else last_epoch_predictions
+        ),
+        "stop_epoch": stop_epoch,
         "model_dict": head.state_dict(),
         "backbone_state_dict": backbone.model.state_dict(),
     }
@@ -1348,19 +1387,7 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
     # ------------------------------------------------------------
     # BACKBONE
     # ------------------------------------------------------------
-    backbone = build_backbone(
-        args.feature_extractor, pretrained=args.pretrained
-    )
-
-    feature_model = FeatureModel(
-        backbone,
-        last_layer=args.last_layer,
-        last_frozen_layer=args.last_frozen_layer,
-    ).to(device)
-
-    dim_in = feature_model.feature_dim
-    print(f"Dimension des features: {dim_in}")
-
+    architecture = ARCHITECTURES[args.feature_extractor]
     # ------------------------------------------------------------
     # TRANSFORMATIONS
     # ------------------------------------------------------------
@@ -1373,20 +1400,20 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
         args.preprocessing_function,
         args.transform_params,
         None,
-        backbone.input_size,
-        backbone.mean,
-        backbone.std,
-        backbone.padding
+        architecture["input_size"],
+        architecture["mean"],
+        architecture["std"],
+        architecture["padding"]
     )
 
     augmented_transform = build_input_transform(
         args.preprocessing_function,
         args.transform_params,
         augmentation,
-        backbone.input_size,
-        backbone.mean,
-        backbone.std,
-        backbone.padding
+        architecture["input_size"],
+        architecture["mean"],
+        architecture["std"],
+        architecture["padding"]
     )
 
     if augmentation is None:
@@ -1400,9 +1427,17 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
     # ------------------------------------------------------------
     # RUNS
     # ------------------------------------------------------------
-    all_rows_last_epoch: list[dict] = []
-    all_rows_early_stop: list[dict] = []
+    val_pred_path = out_dir / "val_pred.csv"
+    early_stop_path = out_dir / "val_pred_early_stop.csv"
+
+    # Fresh files for this execution: predictions are appended after each
+    # run so that already-finished runs are kept if a later run crashes.
+    for path in (val_pred_path, early_stop_path):
+        path.unlink(missing_ok=True)
+
     summary_rows: list[dict] = []
+    num_last_rows = 0
+    num_stop_rows = 0
 
     runs = sorted(splits_df["run"].dropna().unique().tolist())
     if args.limit_runs is not None:
@@ -1560,7 +1595,15 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             detections=val_detections,
             metadata=val_metadata,
         )
+        backbone = build_backbone(
+            args.feature_extractor, pretrained=args.pretrained
+        )
 
+        feature_model = FeatureModel(
+            backbone,
+            last_layer=args.last_layer,
+            last_frozen_layer=args.last_frozen_layer,
+        ).to(device)
         result = train_one_run(
             args.seed,
             make_train_loader,
@@ -1574,13 +1617,13 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             batch_size=args.batch_size,
             lr=args.lr,
             defreeze_epoch=args.defreeze_epoch,
+            min_acc_improvement=args.early_stopping,
         )
 
         train_error = result["train_error"]
         val_error = result["val_error"]
         train_accuracy = result["train_accuracy"]
         val_accuracy = result["val_accuracy"]
-        epoch_val_predictions = result["epoch_val_predictions"]
 
         # ----------------------------------------------------
         # TRAINING CURVES
@@ -1621,26 +1664,35 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
         # ----------------------------------------------------
         # VALIDATION PREDICTIONS
         # ----------------------------------------------------
-        last_epoch = len(epoch_val_predictions) - 1
-        last_rows = epoch_val_predictions[last_epoch]
+        last_rows = result["last_epoch_predictions"]
+        stop_rows = result["early_stop_predictions"]
+        stop_epoch = result["stop_epoch"]
 
-        stop_epoch = find_early_stop_epoch(
-            train_accuracy, args.early_stopping
-        )
-        stop_rows = epoch_val_predictions[stop_epoch]
 
         for row in last_rows:
             row["run"] = run
         for row in stop_rows:
             row["run"] = run
 
-        all_rows_last_epoch.extend(last_rows)
-        all_rows_early_stop.extend(stop_rows)
-
-        # One prediction file per run.
+        # Append this run's predictions immediately (header only on first
+        # write) so a crash does not lose the runs already completed.
         run_pred_df = build_val_pred_df(last_rows)
-        run_pred_path = out_dir / f"val_pred_run_{run}.csv"
-        run_pred_df.to_csv(run_pred_path, index=False)
+        run_pred_df.to_csv(
+            val_pred_path,
+            mode="a",
+            header=not val_pred_path.exists(),
+            index=False,
+        )
+        num_last_rows += len(run_pred_df)
+
+        run_stop_pred_df = build_val_pred_df(stop_rows)
+        run_stop_pred_df.to_csv(
+            early_stop_path,
+            mode="a",
+            header=not early_stop_path.exists(),
+            index=False,
+        )
+        num_stop_rows += len(run_stop_pred_df)
 
         best_epoch = int(np.argmax(val_accuracy))
 
@@ -1671,16 +1723,11 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
     # ============================================================
     # FINAL SAVE
     # ============================================================
-    val_pred_df = build_val_pred_df(all_rows_last_epoch)
-    val_pred_path = out_dir / "val_pred.csv"
-    val_pred_df.to_csv(val_pred_path, index=False)
     print(f"\nValidation predictions: {val_pred_path}")
-    print(f"  {len(val_pred_df)} rows")
+    print(f"  {num_last_rows} rows")
 
-    early_stop_df = build_val_pred_df(all_rows_early_stop)
-    early_stop_path = out_dir / "val_pred_early_stop.csv"
-    early_stop_df.to_csv(early_stop_path, index=False)
     print(f"Predictions (simulated stop): {early_stop_path}")
+    print(f"  {num_stop_rows} rows")
 
     summary_df = pd.DataFrame(summary_rows)
     summary_path = out_dir / "runs_summary.csv"
@@ -1815,12 +1862,19 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
     training = config.get("training_parameters", {}) or {}
     augmentation = config.get("data_augmentation", {}) or {}
     transformation = augmentation.get("torch_transformation")
+    extractor_config = config.get("feature_extractor", {}) or {}
     extractor_params = config.get("feature_extractor_params", {}) or {}
 
+    # `feature_extractor` is a nested block in pipeline.yaml. Keep support
+    # for a plain extractor name for backward compatibility.
+    if isinstance(extractor_config, dict):
+        extractor_name = extractor_config.get("name")
+        extractor_params = {**extractor_config, **extractor_params}
+    else:
+        extractor_name = extractor_config
+
     if args.feature_extractor is None:
-        args.feature_extractor = config.get(
-            "feature_extractor", "ResNet152"
-        )
+        args.feature_extractor = extractor_name or "ResNet152"
     if args.last_layer is None:
         args.last_layer = extractor_params.get("last_layer")
     if args.last_frozen_layer is None:

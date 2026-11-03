@@ -15,7 +15,7 @@ import itertools
 import re
 from pathlib import Path
 from typing import Any, Dict, Iterable
-
+import pdb
 import numpy as np
 import pandas as pd
 
@@ -459,7 +459,6 @@ def main(params: Dict[str, Any]) -> None:
     videos_with_detections = images_df.video.unique()
     train_ratio = params["train_ratio"]
     min_crop_per_label_for_val = params["min_crop_per_label_for_val"]
-    database_path = params["video_database"]
     split_versions = params["split_versions"]
     split_metadata = params["metadata"]
     version = next_split_version(split_versions,split_metadata)
@@ -468,8 +467,7 @@ def main(params: Dict[str, Any]) -> None:
     crops_count_df = images_df.groupby(['label'])['image'].nunique().reset_index(name='nb_crops')
 
     # Load database
-    db_path = Path(database_path)
-    database = pd.read_csv(db_path)
+    database = params["video_database"]
     database = database[database.video.isin(videos_with_detections)]
 
     print(f"[INFO] Database with detections loaded: {database.shape}")
@@ -510,4 +508,4 @@ def main(params: Dict[str, Any]) -> None:
     splits_df.to_csv(
         split_versions.parent / f"{version}_splits.csv",
         index=False)
-    return splits_df, images_df
+    return splits_df, images_df, version

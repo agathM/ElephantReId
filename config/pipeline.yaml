@@ -58,7 +58,7 @@ filter:
 #TRAIN / VAL SPLIT
 split:
     event: "day"  # video, 5min, 1h, day
-    max_runs: 10 #sélection des runs les plus différents, pour le jour peu de différences, pour le split par évènement bcp plus : faire un premier script pour choisir des runs?
+    max_runs: 2 #sélection des runs les plus différents, pour le jour peu de différences, pour le split par évènement bcp plus : faire un premier script pour choisir des runs?
     train_ratio: 0.75
     min_crop_per_label_for_val: 10
     force_val: True #if an indiv appears in more than 2 events at least one in val
@@ -91,18 +91,18 @@ data_augmentation:
 #                "null" => fine-tuning complet.
 feature_extractor:
     name: "ResNet50"  # MiewID, MegaDescriptor, ResNet152
-    last_layer: "fc"              # ResNet152 : entrée de fc (vecteur de features)
-    last_frozen_layer: "layer3"   # layer4 sera fine-tunée (à partir de defreeze_epoch)
+    last_layer: "avgpool"              # output from last_layer
+    last_frozen_layer: "layer3"   # layer4 fine-tuned (at defreeze epoch)
 
 training_parameters:
     batch_size: 64
-    num_epoch: 30
+    num_epoch: 3
     lr: 0.001 #0.5 	0.05 	0.005 	0.001 	0.0005 	0.0001 	0.00005
     pretrained: true
-    aug_epoch: 5      #epoch (1-based) à partir de laquelle l'augmentation est appliquée
-    defreeze_epoch: 10 #epoch after which layers are unfreeze for training feature extractor
+    aug_epoch: 2      #epoch (1-based) à partir de laquelle l'augmentation est appliquée
+    defreeze_epoch: 3 #epoch after which layers are unfreeze for training feature extractor
     early_stopping: 1.0 #MIN_ACC_IMPROVEMENTS = [1.0, 2.0, 5.0, 10.0]
-    num_workers: 4
+    num_workers: 0
     seed: 42
 
 # Classification

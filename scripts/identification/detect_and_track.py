@@ -983,7 +983,7 @@ def main(metadata:dict):
     conf = metadata["conf"]
     target_fps = metadata["fps"]
     identification_threshold = metadata["identification_threshold"]
-    single_indiv_videos_df = pd.read_csv(home_dir / metadata['video_database'])
+    single_indiv_videos_df = metadata['video_database']
     single_indiv_videos_df = single_indiv_videos_df[single_indiv_videos_df.several_indivs==False].filter(['indiv','video'])
     single_indiv_videos = {row['video']:row['indiv'] for _,row in single_indiv_videos_df.iterrows()}
     model_path = home_dir / metadata['model_dir'] / (model_name + '.pt')
