@@ -27,9 +27,10 @@ ou, depuis `pipeline.py`, via `run_training(args)`.
 SORTIES (dans `--out-dir`)
 --------------------------
     train_curv_run_<run>.png   courbes loss / accuracy du run
-    val_pred.csv               prédictions de validation (dernière epoch),
-                               complétées après chaque run (append)
-    val_pred_early_stop.csv    prédictions à l'epoch d'arrêt simulée,
+    model_run_<run>.pth        poids du modèle à l'epoch d'arrêt (early stopping)
+    median_model.pth           seul modèle conservé : celui dont la val accuracy
+                               est la plus proche de la médiane des runs
+    val_pred_early_stop.csv    prédictions à l'epoch d'arrêt,
                                complétées après chaque run (append)
     runs_summary.csv           métriques par run (train_acc, val_acc, ...)
 """
@@ -54,7 +55,6 @@ import torch.nn as nn
 import yaml
 
 import matplotlib
-from kornia.models.rt_detr import architecture
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -640,8 +640,6 @@ class FeatureModel(nn.Module):
                 f"last_frozen_layer '{last_frozen_layer}' inconnu pour "
             )
 
-        self.module_path = self.last_layer
-
         # --------------------------------------------------
         # Couches fine-tunables : entre last_frozen_layer et
         # last_layer (bornes comprises), la couche de classification
@@ -721,7 +719,6 @@ class FeatureModel(nn.Module):
             if parent and parent in in_range: #si parent est dans in_range pas besoin de l'ajouter car le parent couvre les enfants
                 continue
             selected.append((path, key))
-        print(selected)
 
         selected.sort(key=lambda item: item[1]) #trie par ordre croissant
 
@@ -735,7 +732,7 @@ class FeatureModel(nn.Module):
         )
         with torch.no_grad():
             features = extract_features(
-                self.model, dummy, self.module_path
+                self.model, dummy, self.last_layer
             )
         if features.dim() > 2:
             features = torch.flatten(features, 1)
@@ -774,12 +771,12 @@ class FeatureModel(nn.Module):
         #check si besoin de grad er flatten pour avant la classification Head -> avgpool?
         if any(p.requires_grad for p in self._candidate_parameters):
             features = extract_features(
-                self.model, x, self.module_path
+                self.model, x, self.last_layer
             )
         else:
             with torch.no_grad():
                 features = extract_features(
-                    self.model, x, self.module_path
+                    self.model, x, self.last_layer
                 )
         if features.dim() > 2:
             features = torch.flatten(features, 1)
@@ -884,13 +881,12 @@ def train_one_run(
     val_dataset,
     class_names: list,
     num_classes: int,
-    dim_in: int,
     device: torch.device,
     num_epoch: int = 30,
     batch_size: int = 64,
     lr: float = 1e-3,
     defreeze_epoch: int | None = None,
-    min_acc_improvement: float = 1.0,
+    min_acc_improvement: float | None = 1.0,
 ):
     """Entraîne la tête de classification (et éventuellement le backbone).
 
@@ -904,28 +900,38 @@ def train_one_run(
           indispensable dès que l'augmentation est active ou que le backbone
           est fine-tuné (sinon les features seraient obsolètes).
 
-    L'entraînement parcourt TOUJOURS tous les epochs (num_epoch), sans
-    early stopping : les courbes sont collectées pour décider après coup des
-    points de sauvegarde. Pour limiter la mémoire, les prédictions de
-    validation ne sont matérialisées que pour deux epochs au plus :
-    l'epoch d'arrêt simulée (première epoch dont l'amélioration d'accuracy
-    train passe sous `min_acc_improvement`) et la dernière epoch.
+    L'entraînement parcourt TOUS les epochs (num_epoch) : les courbes sont
+    collectées pour décider après coup de l'epoch d'arrêt. Si
+    `min_acc_improvement` est renseigné, l'arrêt correspond à la première
+    epoch dont l'amélioration d'accuracy train passe sous le seuil. S'il vaut
+    `None`, aucun early stopping n'est appliqué et l'arrêt correspond à la
+    dernière epoch.
 
     Returns
     -------
     dict
         - train_error / val_error : list[float] (loss par epoch)
         - train_accuracy / val_accuracy : list[float] (accuracy % par epoch)
-        - last_epoch_predictions : list[dict]
-            Prédictions de validation (rows prêtes pour val_pred.csv) de la
-            dernière epoch.
         - early_stop_predictions : list[dict]
-            Prédictions de validation de l'epoch d'arrêt simulée (ou de la
-            dernière epoch si aucun arrêt n'est déclenché).
+            Prédictions de validation à l'epoch d'arrêt (ou de la dernière
+            epoch si aucun arrêt n'est déclenché).
+        - stop_epoch : int
+            Indice (0-based) de l'epoch d'arrêt.
+        - is_finetuned : bool
+            Vrai si le backbone était réellement fine-tuné (au moins un
+            paramètre entraînable) à l'epoch d'arrêt.
+        - model_dict / backbone_state_dict
+            Poids sauvegardés À L'EPOCH D'ARRÊT.
     """
 
     set_seed(seed)
     stop_epoch = None
+    stop_head_state = None
+    stop_backbone_state = None
+    # Vrai si le backbone était réellement fine-tuné (au moins un paramètre
+    # entraînable) à l'epoch d'arrêt. Utilisé avant la sauvegarde des poids.
+    stop_is_finetuned = False
+    dim_in = backbone._feature_dim
     head = ClassificationHead(
         dim_out=num_classes,
         dim_in=dim_in,
@@ -942,7 +948,6 @@ def train_one_run(
     # sont simplement inactives (requires_grad=False) tant que l'epoch de
     # dégel n'est pas atteinte.
     parameters = list(head.parameters()) + list(backbone.trainable_parameters)
-    print(parameters)
 
     optimizer = torch.optim.Adam(
         parameters,
@@ -969,10 +974,20 @@ def train_one_run(
     train_accuracy = []
     val_accuracy = []
 
-    # Seules les prédictions de l'epoch d'arrêt simulée et de la dernière
+    # Seules les prédictions de l'epoch d'arrêt et, à défaut, de la dernière
     # epoch sont conservées (les autres sont jetées après la validation).
-    last_epoch_predictions = None
     early_stop_predictions = None
+    last_epoch_predictions = None
+
+    # État du fine-tuning à la dernière epoch traitée (voir boucle ci-dessous).
+    is_finetuned = False
+
+    def snapshot_state(module: nn.Module) -> dict:
+        """Copie les poids sur CPU pour figer l'état d'une epoch."""
+        return {
+            key: value.detach().cpu().clone()
+            for key, value in module.state_dict().items()
+        }
 
     for epoch in range(num_epoch):
 
@@ -986,6 +1001,13 @@ def train_one_run(
             backbone.set_trainable(False)
         else:
             backbone.set_trainable((epoch + 1) >= defreeze_epoch)
+
+        # Indique si le backbone est réellement fine-tuné à cette epoch
+        # (au moins un paramètre du backbone est entraînable).
+        is_finetuned = any(
+            parameter.requires_grad
+            for parameter in backbone.trainable_parameters
+        )
 
         # Backbone figé => les features ne changent pas d'une epoch à l'autre.
         frozen = defreeze_epoch is not None and (epoch + 1) < defreeze_epoch
@@ -1057,7 +1079,11 @@ def train_one_run(
         # Seules l'epoch d'arrêt simulée et la dernière epoch sont gardées :
         # les rows des autres epochs sont inutiles et coûteux en mémoire.
         is_stop_epoch = False
-        if early_stop_predictions is None and len(train_accuracy) >= 2:
+        if (
+            min_acc_improvement is not None
+            and early_stop_predictions is None
+            and len(train_accuracy) >= 2
+        ):
             previous_acc = train_accuracy[-2]
             current_acc = train_accuracy[-1]
 
@@ -1068,7 +1094,12 @@ def train_one_run(
                 is_stop_epoch = improvement < min_acc_improvement
 
         is_last_epoch = epoch == num_epoch - 1
-        keep_predictions = is_last_epoch or is_stop_epoch
+        # Si aucun early stopping n'a encore été déclenché, on conserve les
+        # prédictions de la dernière epoch : elles serviront d'arrêt si
+        # `min_acc_improvement` est None.
+        keep_predictions = is_stop_epoch or (
+            is_last_epoch and stop_epoch is None
+        )
 
         val_prediction_rows = [] if keep_predictions else None
 
@@ -1211,33 +1242,37 @@ def train_one_run(
 
         scheduler.step(error)
 
-        # On ne conserve que les prédictions de l'epoch d'arrêt simulée et
-        # celles de la dernière epoch.
+        if is_last_epoch and stop_epoch is None:
+            last_epoch_predictions = val_prediction_rows
+
+        # On fige les poids de l'epoch d'arrêt : ce sont EUX (et non ceux de
+        # la dernière epoch) qui seront sauvegardés.
         if is_stop_epoch:
             early_stop_predictions = val_prediction_rows
             stop_epoch = epoch
-        if is_last_epoch:
-            last_epoch_predictions = val_prediction_rows
+            stop_is_finetuned = is_finetuned
+            stop_head_state = snapshot_state(head)
+            stop_backbone_state = snapshot_state(backbone.model)
 
-    # Si aucun arrêt n'a été déclenché, l'arrêt simulé correspond à la
-    # dernière epoch.
+    # Si aucun arrêt n'a été déclenché (early stopping désactivé ou jamais
+    # atteint), l'arrêt correspond à la dernière epoch.
     if stop_epoch is None:
         stop_epoch = len(train_accuracy) - 1
+        stop_is_finetuned = is_finetuned
+        early_stop_predictions = last_epoch_predictions
+        stop_head_state = snapshot_state(head)
+        stop_backbone_state = snapshot_state(backbone.model)
 
     return {
         "train_error": train_error,
         "val_error": val_error,
         "train_accuracy": train_accuracy,
         "val_accuracy": val_accuracy,
-        "last_epoch_predictions": last_epoch_predictions,
-        "early_stop_predictions": (
-            early_stop_predictions
-            if early_stop_predictions is not None
-            else last_epoch_predictions
-        ),
+        "early_stop_predictions": early_stop_predictions,
         "stop_epoch": stop_epoch,
-        "model_dict": head.state_dict(),
-        "backbone_state_dict": backbone.model.state_dict(),
+        "is_finetuned": stop_is_finetuned,
+        "model_dict": stop_head_state,
+        "backbone_state_dict": stop_backbone_state,
     }
 
 
@@ -1349,7 +1384,8 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    model_dir = Path(args.model_dir) if args.model_dir else out_dir / "models"
+    # Les modèles sont sauvegardés directement dans le dossier de résultats.
+    model_dir = out_dir / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device(
@@ -1403,7 +1439,7 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
         architecture["input_size"],
         architecture["mean"],
         architecture["std"],
-        architecture["padding"]
+        architecture.get("padding"),
     )
 
     augmented_transform = build_input_transform(
@@ -1413,7 +1449,7 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
         architecture["input_size"],
         architecture["mean"],
         architecture["std"],
-        architecture["padding"]
+        architecture.get("padding"),
     )
 
     if augmentation is None:
@@ -1427,16 +1463,14 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
     # ------------------------------------------------------------
     # RUNS
     # ------------------------------------------------------------
-    val_pred_path = out_dir / "val_pred.csv"
     early_stop_path = out_dir / "val_pred_early_stop.csv"
 
-    # Fresh files for this execution: predictions are appended after each
+    # Fresh file for this execution: predictions are appended after each
     # run so that already-finished runs are kept if a later run crashes.
-    for path in (val_pred_path, early_stop_path):
-        path.unlink(missing_ok=True)
+    early_stop_path.unlink(missing_ok=True)
 
     summary_rows: list[dict] = []
-    num_last_rows = 0
+    run_val_accuracies: dict = {}
     num_stop_rows = 0
 
     runs = sorted(splits_df["run"].dropna().unique().tolist())
@@ -1611,7 +1645,6 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             val_dataset,
             class_names,
             num_classes,
-            dim_in,
             device,
             num_epoch=args.num_epoch,
             batch_size=args.batch_size,
@@ -1624,6 +1657,9 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
         val_error = result["val_error"]
         train_accuracy = result["train_accuracy"]
         val_accuracy = result["val_accuracy"]
+        stop_epoch = result["stop_epoch"]
+        stop_val_accuracy = val_accuracy[stop_epoch]
+        run_val_accuracies[run] = stop_val_accuracy
 
         # ----------------------------------------------------
         # TRAINING CURVES
@@ -1640,50 +1676,49 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
         print(f"  Curves saved: {curv_path}")
 
         # ----------------------------------------------------
-        # MODEL WEIGHTS
+        # MODEL WEIGHTS (early stopping only)
         # ----------------------------------------------------
         model_path = model_dir / f"model_run_{run}.pth"
         detections = sorted(df["detection"].unique().tolist())
-        torch.save(
-            {
-                "backbone_state_dict": result["backbone_state_dict"],
-                "head_state_dict": result["model_dict"],
-                "class_names": class_names,
-                "detections": detections,
-                "feature_extractor": args.feature_extractor,
-                "last_layer": args.last_layer,
-                "last_frozen_layer": args.last_frozen_layer,
-                "num_epoch": args.num_epoch,
-                "val_accuracy": val_accuracy[-1],
-                "train_accuracy": train_accuracy[-1],
-            },
-            model_path,
-        )
-        print(f"  Weights saved: {model_path}")
+        is_finetuned = result["is_finetuned"]
+
+        if not is_finetuned:
+            print(
+                f"  Modèle non fine-tuné à l'epoch {stop_epoch + 1} : "
+                f"poids non enregistrés ({model_path})."
+            )
+        else:
+            torch.save(
+                {
+                    "backbone_state_dict": result["backbone_state_dict"],
+                    "head_state_dict": result["model_dict"],
+                    "run": run,
+                    "class_names": class_names,
+                    "detections": detections,
+                    "feature_extractor": args.feature_extractor,
+                    "last_layer": args.last_layer,
+                    "last_frozen_layer": args.last_frozen_layer,
+                    "num_epoch": args.num_epoch,
+                    "stop_epoch": stop_epoch + 1,
+                    "early_stopping": args.early_stopping,
+                    "is_finetuned": is_finetuned,
+                    "val_accuracy": stop_val_accuracy,
+                    "train_accuracy": train_accuracy[stop_epoch],
+                },
+                model_path,
+            )
+            print(f"  Weights saved (epoch {stop_epoch + 1}): {model_path}")
 
         # ----------------------------------------------------
         # VALIDATION PREDICTIONS
         # ----------------------------------------------------
-        last_rows = result["last_epoch_predictions"]
-        stop_rows = result["early_stop_predictions"]
-        stop_epoch = result["stop_epoch"]
+        stop_rows = result["early_stop_predictions"] or []
 
-
-        for row in last_rows:
-            row["run"] = run
         for row in stop_rows:
             row["run"] = run
 
         # Append this run's predictions immediately (header only on first
         # write) so a crash does not lose the runs already completed.
-        run_pred_df = build_val_pred_df(last_rows)
-        run_pred_df.to_csv(
-            val_pred_path,
-            mode="a",
-            header=not val_pred_path.exists(),
-            index=False,
-        )
-        num_last_rows += len(run_pred_df)
 
         run_stop_pred_df = build_val_pred_df(stop_rows)
         run_stop_pred_df.to_csv(
@@ -1715,24 +1750,57 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
         )
 
         print(
-            f"  Train acc : {train_accuracy[-1]:.2f}% | "
-            f"Val acc : {val_accuracy[-1]:.2f}% | "
-            f"simulated stop epoch {stop_epoch + 1}"
+            f"  Train acc : {train_accuracy[stop_epoch]:.2f}% | "
+            f"Val acc : {val_accuracy[stop_epoch]:.2f}% | "
+            f"stop epoch {stop_epoch + 1}"
         )
 
     # ============================================================
     # FINAL SAVE
     # ============================================================
-    print(f"\nValidation predictions: {val_pred_path}")
-    print(f"  {num_last_rows} rows")
 
-    print(f"Predictions (simulated stop): {early_stop_path}")
+    print(f"Predictions (stop epoch): {early_stop_path}")
     print(f"  {num_stop_rows} rows")
 
     summary_df = pd.DataFrame(summary_rows)
     summary_path = out_dir / "runs_summary.csv"
     summary_df.to_csv(summary_path, index=False)
     print(f"Runs summary: {summary_path}")
+
+    """# ------------------------------------------------------------
+    # Ne conserver que le modèle dont la val accuracy est la plus
+    # proche de la médiane des val accuracy de tous les runs.
+    # ------------------------------------------------------------
+    if run_val_accuracies:
+        median_val_accuracy = float(
+            np.median(list(run_val_accuracies.values()))
+        )
+        median_run = min(
+            run_val_accuracies,
+            key=lambda run: abs(
+                run_val_accuracies[run] - median_val_accuracy
+            ),
+        )
+
+        selected_path = model_dir / f"model_run_{median_run}.pth"
+        median_model_path = model_dir / "median_model.pth"
+
+        if selected_path.exists():
+            for run in run_val_accuracies:
+                candidate_path = model_dir / f"model_run_{run}.pth"
+                if candidate_path != selected_path and candidate_path.exists():
+                    candidate_path.unlink()
+
+            median_model_path.unlink(missing_ok=True)
+            selected_path.rename(median_model_path)
+
+            print(
+                f"Median model: run {median_run} "
+                f"(val acc {run_val_accuracies[median_run]:.2f}%, "
+                f"median {median_val_accuracy:.2f}%) -> {median_model_path}"
+            )
+        else:
+            print(f"Median model not found: {selected_path}")"""
 
     return summary_df
 

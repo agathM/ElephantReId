@@ -10,7 +10,9 @@ Lit un fichier de configuration YAML (par défaut `config/pipeline.yaml`) et :
 3. exécute le script d'entraînement modulaire `scripts/train_classifier.py`
    (extraction des features, fine-tuning éventuel, tête ClassificationHead,
    augmentation RandomAffine + ColorJitter, un run par split) ;
-4. complète le tableau récapitulatif des expériences (`all_experiments.csv`)
+4. exécute `cosine_similarity.py` sur le backbone du modèle médian pour
+   produire `val_pred.csv` (voisins cosinus + vote majoritaire) ;
+5. complète le tableau récapitulatif des expériences (`all_experiments.csv`)
    avec une ligne par run (train_acc, val_acc, ...).
 
 USAGE
@@ -26,7 +28,7 @@ from pathlib import Path
 import importlib
 import pandas as pd
 import yaml
-import train_classifier, detect_and_track
+import train_classifier, detect_and_track, cosine_similarity
 import os
 import pdb
 
@@ -63,14 +65,10 @@ AUG_PARAMS = {
 EXPERIMENT_COLUMNS = [
     "version",
     "dataset_date",
-    "detection_model",
+    "detections",
     "mode",
-    "split_method",
     "architecture",
     "data_augmentation",
-    "classification_head",
-    "train_acc",
-    "val_acc",
 ]
 
 EXPERIMENTS_CSV_NAME = "all_experiments.csv"
@@ -190,14 +188,38 @@ def copy_config_files(
         copied.append(destination)
     return copied
 
-
+import numpy as np
 def get_existing_version(df: pd.DataFrame, row: dict) -> str | None:
     """Return the version if a matching row exists, otherwise None."""
 
-    mask = df[list(row.keys())].eq(pd.Series(row)).all(axis=1)
+    def normalize(value):
+        if isinstance(value, list):
+            return str(value)
+        if value is None or (np.isscalar(value) and pd.isna(value)):
+            return None
+        return value
 
-    if mask.any():
-        return df.loc[mask, "version"].iloc[0]
+    columns = list(row.keys())
+
+    row_values = {key: normalize(value) for key, value in row.items()}
+
+    for idx, df_row in df.iterrows():
+        differences = {}
+
+        for col in columns:
+            df_value = normalize(df_row[col])
+            row_value = row_values[col]
+
+            if df_value != row_value:
+                differences[col] = {
+                    "df": repr(df_value),
+                    "row": repr(row_value),
+                    "df_type": type(df_value).__name__,
+                    "row_type": type(row_value).__name__,
+                }
+
+        if not differences:
+            return df_row["version"]
 
     return None
 
@@ -454,7 +476,6 @@ def main(argv: list[str] | None = None) -> None:
         split_version = get_existing_version(split_metadata_df, split_metadata)
     else:
         split_version = None
-
     #SPLIT DETECTIONS
     if split_version:
         splits_df = pd.read_csv(split_dir  / f"{split_version}_splits.csv")
@@ -470,7 +491,7 @@ def main(argv: list[str] | None = None) -> None:
                 min_area = filter["min_area"]
                 min_ratio = filter["min_ratio"]
                 max_ratio = filter["max_ratio"]
-                crops_file = crops_dir / f"{model.split(".")[0]}.csv"
+                crops_file = crops_dir / f"{model.split('.')[0]}.csv"
                 df = pd.read_csv(crops_file)
                 df = df[~df.indiv.isna()]
                 df = df[(df.conf >= conf) & (df.area >= min_area)]
@@ -499,8 +520,21 @@ def main(argv: list[str] | None = None) -> None:
         splits_df, images_df, split_version = split.main(split_config)
         print(splits_df.head())
         print(images_df.head())
+    images_df = images_df.drop_duplicates(
+        subset=['event', 'label'],
+        keep='last'
+    ).reset_index(drop=True)
+    images_df = images_df[images_df.event.isin([i for i in range(10)])]
+    splits_df = splits_df[splits_df.event.isin([i for i in range(10)])]
+    label_to_split = images_df.merge(splits_df, how='inner', on='event').groupby('label').agg(set).to_dict()
+    for label in label_to_split:
+        if label_to_split[label]==set(['val']):
+            images_df = images_df[~images_df.label.isin([label])]
+
     splits_df.to_csv(results_dir / "input_metadata" / f"{split_version}_splits.csv")
     images_df.to_csv(results_dir / "input_metadata" / f"{split_version}_selected_images.csv")
+
+
     # ------------------------------------------------------------
     # 2) TRAINING
     # ------------------------------------------------------------
@@ -516,18 +550,35 @@ def main(argv: list[str] | None = None) -> None:
     summary_df = train_classifier.run_training(args)
     if summary_df.empty:
         return
+
+    cosine_df = cosine_similarity.run_similarity(args)
+    if isinstance(cosine_df, pd.DataFrame) and not cosine_df.empty:
+        if "run" in cosine_df.columns and "cosine_acc" in cosine_df.columns:
+            summary_df = summary_df.merge(
+                cosine_df[["run", "cosine_acc"]], on="run", how="left"
+            )
+            cosine_path = Path(args.out_dir) / "runs_summary.csv"
+            summary_df.to_csv(cosine_path, index=False)
+            print(f"Runs summary updated with cosine_acc: {cosine_path}")
+
     summary_df['train_weights'] = (
         summary_df.num_train / summary_df.num_train.sum()
     )
     summary_df['val_weights'] = summary_df.num_val / summary_df.num_val.sum()
     train_std = summary_df.train_acc.std(axis=0)
     val_std = summary_df.val_acc.std(axis=0)
+    cos_val_std = summary_df.cosine_acc.std(axis=0)
     mean_train_acc_over_runs = (
-        (summary_df['train_acc'] * summary_df['train_acc']).mean()
+        (summary_df['train_acc'] * summary_df['train_weights']).mean()
     )
     mean_val_acc_over_runs = (
-        (summary_df['val_acc'] * summary_df['val_acc']).mean()
+        (summary_df['val_acc'] * summary_df['val_weights']).mean()
     )
+    mean_cosine_acc_over_run = None
+    if "cosine_acc" in summary_df.columns and summary_df["cosine_acc"].notna().any():
+        mean_cosine_acc_over_run = float(
+            (summary_df["cosine_acc"].astype(float) * summary_df["val_weights"]).mean()
+        )
 
     # ------------------------------------------------------------
     # 3) TABLEAU RÉCAPITULATIF DES EXPÉRIENCES
@@ -535,18 +586,19 @@ def main(argv: list[str] | None = None) -> None:
     row ={
             "version": version,
             "dataset_date": config.get("dataset_date", ""),
-            "detection_model": config.get("detection_model", ""),
+            "detections": DETECT_CHOICES,
             "mode": MODE,
-            "split_method": (
-                (config.get("split", {}) or {}).get("split_method", "")
-            ),
+            "split_event": config['split']['event'],
             "architecture": args.feature_extractor,
             "data_augmentation": describe_augmentation(config),
-            "classification_head": "ClassificationHead",
+            "last_fozen_layer": config["feature_extractor"]["last_frozen_layer"],
             "mean_train_acc_over_runs": mean_train_acc_over_runs,
-            "mean_val_acc_over_run": mean_val_acc_over_runs,
             "train_acc_std": train_std,
+            "mean_val_acc_over_run": mean_val_acc_over_runs,
             "val_acc_std": val_std,
+            "mean_cosine_acc_over_run": mean_cosine_acc_over_run,
+            "val_cosine_acc_std": cos_val_std,
+
         }
 
     experiments_path = results_root / EXPERIMENTS_CSV_NAME
