@@ -1,4 +1,8 @@
-from pathlib import Path
+"""For ear segmentation only
+filter cut ears on three parameters :
+the max cut score of all side cut score
+side cut score being the length of the biggest consecutive number of pixels (horizontal or vertical) on the sum of pixels of one side (horizontal or vertical)
+the horizontal and vertical cut ratio corresponding to the length of the side of the maximum cut score on the perpendicular dimension (height or width)"""
 
 import numpy as np
 import pandas as pd

@@ -50,6 +50,22 @@ CSV_COLUMNS = [
     "indiv"
 ]
 
+CROPS_DTYPES = {
+    "video": str,
+    "image": str,
+    "track_id": int,
+    "detection": str,
+    "area": int,
+    "ratio": float,
+    "indiv": str,
+    "frame": int,
+    "conf": float,
+    "x1": int,
+    "x2": int,
+    "y1": int,
+    "y2": int,
+}
+
 
 # ============================================================
 # Utility functions
@@ -149,16 +165,14 @@ def append_rows(rows):
         parents=True,
         exist_ok=True
     )
-
-    pd.DataFrame(
+    df = pd.DataFrame(
         rows,
         columns=CSV_COLUMNS,
-    ).to_csv(
-        crops_file_path,
-        mode="a",
-        header=not crops_file_path.exists(),
-        index=False,
     )
+    if os.path.exists(crops_file_path):
+        df_all = pd.read_csv(crops_file_path)
+        df = pd.concat([df, df_all])
+    df.to_csv(index=False)
 
 
 def tracked_video_exists(tracked_videos_dir, video_path):
@@ -494,7 +508,10 @@ def process_video_seg(
                         if bbox_mask is None:
                             continue
 
-                        x1, y1, x2, y2 = bbox_mask
+                        x1 = int(round(bbox_mask[0]))
+                        y1 = int(round(bbox_mask[1]))
+                        x2 = int(round(bbox_mask[2]))
+                        y2 = int(round(bbox_mask[3]))
 
                         image = (
                             f"{video_path.stem}"
@@ -508,7 +525,7 @@ def process_video_seg(
                                     video_path.name,
 
                                 "frame":
-                                    frame_number,
+                                    int(frame_number),
 
                                 "track_id":
                                     track_id,
@@ -517,7 +534,7 @@ def process_video_seg(
                                     label.replace(" ","_"),
 
                                 "conf":
-                                    conf,
+                                    round(conf,2),
 
                                 "x1":
                                     x1,
@@ -535,7 +552,7 @@ def process_video_seg(
                                     int(np.sum(mask)),
 
                                 "ratio":
-                                    round(x2 - x1) / max(round(y2 - y1), 1)
+                                    round((x2 - x1) / max(y2 - y1, 1),1)
                             }
                         indiv = get_detection_id(row)
 
@@ -561,7 +578,9 @@ def process_video_seg(
                                 crop,
                             )
                             # new detection with id implies that new split will have to be created
-                            shutil.rmtree(split_dir)
+                            # new detection with id implies that new split will have to be created
+                            if os.path.exists(split_dir):
+                                shutil.rmtree(split_dir)
                         row['indiv'] = indiv
                         last_detections[-1]['indiv'] = indiv
                         csv_rows.append(row)
@@ -708,7 +727,7 @@ def process_video_crop(
                                 video_path.name,
 
                             "frame":
-                                frame_number,
+                                int(frame_number),
 
                             "track_id":
                                 track_id,
@@ -717,7 +736,7 @@ def process_video_crop(
                                 label.replace(" ", "_"),
 
                             "conf":
-                                conf,
+                                round(conf,2),
 
                             "x1":
                                 x1,
@@ -735,7 +754,7 @@ def process_video_crop(
                                 round(x2 - x1) * round(y2 - y1),
 
                             "ratio":
-                                round(x2 - x1) / max(round(y2 - y1), 1)
+                                round((x2 - x1) / max(y2 - y1, 1),1)
                         }
                         indiv = get_detection_id(row)
 
@@ -747,7 +766,8 @@ def process_video_crop(
                         else:
                             cv2.imwrite(crops_dir / label.replace(" ", "_") / image, frame[y1:y2, x1:x2])
                             # new detection with id implies that new split will have to be created
-                            shutil.rmtree(split_dir)
+                            if os.path.exists(split_dir):
+                                shutil.rmtree(split_dir)
                         row['indiv'] = indiv
                         last_detections[-1]['indiv'] = indiv
                         csv_rows.append(row)
@@ -884,7 +904,7 @@ def process_video_megadetector(
                                         video_path.name,
 
                                     "frame":
-                                        frame_number,
+                                        int(frame_number),
 
                                     "track_id":
                                         track_id,
@@ -893,7 +913,7 @@ def process_video_megadetector(
                                         label.replace(" ", "_"),
 
                                     "conf":
-                                        conf,
+                                        round(conf,2),
 
                                     "x1":
                                         x1,
@@ -911,7 +931,7 @@ def process_video_megadetector(
                                         round(x2 - x1) * round(y2 - y1),
 
                                     "ratio":
-                                        round(x2 - x1) / max(round(y2 - y1), 1)
+                                        round((x2 - x1) / max(y2 - y1, 1),1)
                                 }
                                 indiv = get_detection_id(row)
 
@@ -933,7 +953,8 @@ def process_video_megadetector(
                                         crop,
                                     )
                                     # new detection with id implies that new split will have to be created
-                                    shutil.rmtree(split_dir)
+                                    if os.path.exists(split_dir):
+                                        shutil.rmtree(split_dir)
 
                                 row['indiv'] = indiv
                                 last_detections[-1]['indiv'] = indiv
@@ -957,7 +978,7 @@ def process_video_megadetector(
 
 def main(metadata:dict):
     global frame_database_df, crops_dir, crops_file_path, identification_threshold, single_indiv_videos, \
-        save_videos_with_detections, tracked_videos_dir, labels,split_dir
+        save_videos_with_detections, tracked_videos_dir, labels,split_dir, rerun
     home_dir = Path(metadata['home_dir'])
     split_dir = Path(metadata['split_dir'])
     frame_database = home_dir / metadata['frame_database']
@@ -970,6 +991,7 @@ def main(metadata:dict):
     keep_detections_without_id = metadata["keep_detections_without_id"]
     save_videos_with_detections = metadata["save_videos_with_detections"]
     labels_to_keep = metadata["labels_to_keep"]
+    rerun = metadata["rerun"]
     tracked_videos_dir = None
     if save_videos_with_detections:
         tracked_videos_rel = metadata['tracked_videos_dir']
@@ -1062,8 +1084,11 @@ def main(metadata:dict):
     else:
         with open(treated_path, "rb") as f:
             treated_videos = pickle.load(f)
-        videos_to_treat = video_paths.copy() - treated_videos["all_detect"]
-        videos_to_treat.update(get_partially_treated_video_to_treat(treated_videos['some_detect']))
+        if rerun:
+            videos_to_treat = video_paths.copy() - treated_videos["all_detect"]
+            videos_to_treat.update(get_partially_treated_video_to_treat(treated_videos['some_detect']))
+        else:
+            videos_to_treat = video_paths.copy() - treated_videos["all_detect"].union(treated_videos['some_detect'])
 
     print(
         f"{len(video_paths)} videos found, "
@@ -1092,7 +1117,7 @@ def main(metadata:dict):
     n_done = 0
     n_failed = []
 
-    for p, reset_tracker in videos_with_reset:
+    for p, reset_tracker in videos_with_reset[:1]:
         rows = []
         detections_by_frame = {}
         args = {"model": model,
@@ -1163,10 +1188,10 @@ def main(metadata:dict):
 
     if os.path.exists(crops_file_path):
         df = pd.read_csv(crops_file_path)
-        df_video_label = df.filter(['video', 'label']).drop_duplicates()
+        df_video_label = df.filter(['video', 'detection']).drop_duplicates()
         video_count_by_label = (
             df_video_label
-            .groupby('label')['video']
+            .groupby('detection')['video']
             .nunique()
             .reset_index(name='n_videos')
         )

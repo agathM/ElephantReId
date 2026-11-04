@@ -4,10 +4,15 @@ Configurable "event" based split script.
 Goal:
 - Take a dict as input:
   {'event': 'day' | 'week' | 'month' | '5min' | '5h', 'max_runs': ..., 'images_df': ..., 'database': ...}
-- Assign an event to each video of `database` based on `event` and the `time` column (same logic as summary_videos_v2: event_day or entry < 5min)
+- Assign an event to each video of `database` based on `event` and the `time` column event is a duration groups video when succesive creation time is less than duration
 - Link via `images_df` (columns `video`, `label`) all labels present per event
-- Apply the same rules as `manual_split.py` to crops/events (label with a single event -> train, labels with < 10 crops -> train) using the chosen event
-- Enumerate all possible train/val assignment combinations for non-forced events and export a CSV with columns: event, run, split
+- Forcing rules by order of priority:
+    -at least one event in train per label,
+    - if total crops of on label < min_crop_per_label_for_val all events goes to train
+    - if force_val at least one event in val for labels appearing in two events,
+
+- Enumerate all possible train/val assignment combinations for non-forced events and export a CSV with columns: event, run, split without taking into account force_val
+- If more events than max_run generate max_run splits
 - Returns images_df with split column added
 """
 import pdb

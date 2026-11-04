@@ -1,26 +1,22 @@
 # DATABASE AND HOMEPATH
 dataset_date: "21/10/2026"
-video_database: "video_database.csv"
-frame_database: "frame_database.csv" #base de données avec soit indiv unique sur video soit coordonnées de l'oreille identifiée
+video_database: "video_database.csv" #database with metadata and individuals appearance
+frame_database: "frame_database.csv" #database with either a unique indiv per video or the coordinates of the identified ear
 home_dir: "/home/agath/Documents/MNHN/code"#"/sps/mnhn/ameurisse/ElephantReId"
-crops_dir: "data/processed/crops"        # dossier des images de crops
-split_dir: "data/processed/crops/split_files"  # table des splits (run, split)
+crops_dir: "data/processed/crops"        # crop images folder
+split_dir: "data/processed/crops/split_files"  # splits table (run, split)
 split_versions: "splits_metadata.csv"
 
 #DETECTIONS PARAMETERS
 detection:
   videos_dir: "data/raw/indiv_videos"
   images_dir: "data/raw/"
-#  model_name: "MDV6-yolov10-e" #"head_ears_detect_09_08" "seg_ears_lr_v2"  for megadetector
-#  body_part_task: #ear head body and seg detect
-#    - "ear seg"
-#    - "head detect"
-  fps: 2 #frame per second for detection can be changed to take into account the elephant mouvement
+  fps: 2 #frames per second for detection, can be changed to account for elephant movement
   tracker:  "ByteTrack"  # ByteTrack
-  keep_detections_without_id: False #save detection without indiv match from database
-  save_videos_with_detections: False #save videos with detections and track ids to annotate detections when several individuals in videos (careful dpn't take into account the body part, I choose ear)
-  conf: 0.1 #for head detector to change (save with model ?)
-  model_dir: "models/detection"  # dossier des poids des modèles
+  keep_detections_without_id: False #keep detections without indiv match from the frame_database
+  save_videos_with_detections: False #save videos with detections and track ids to annotate detections when several individuals are in the videos (careful: body part is ignored, ear is used)
+  conf: 0.1 #for the head detector to tune (saved with the model?)
+  model_dir: "models/detection"  # model weights folder
   tracked_videos_dir: "data/processed/tracked_videos"
   identification_threshold: 0.8 #portion of segmented ear of individual included in the detection box
 
@@ -55,50 +51,50 @@ filter:
 #TRAIN / VAL SPLIT
 split:
     event: "day"  # video, 5min, 1h, day
-    max_runs: 2 #sélection des runs les plus différents, pour le jour peu de différences, pour le split par évènement bcp plus : faire un premier script pour choisir des runs?
-    train_ratio: 0.75
+    max_runs: 2 #selection of the most different runs
+    train_ratio: 0.75 #portion of train crops desired in training set
     min_crop_per_label_for_val: 10
-    force_val: True #if an indiv appears in more than 2 events at least one in val
+    force_val: True #if an indiv appears in more than 2 events, at least one is in val
 
 # Image preprocessing
 preprocessing_function: "brightness_normalized" #choose function from image_preprocessing or null
 
 # Data augmentation
 data_augmentation:
-    fold_size: 10 #number of augmentation if metric learning
+    fold_size: 10 #number of augmentations if metric learning
     script: null
     function: "get_augmentation"
     torch_transformation:
           affine:                 #https://docs.pytorch.org/vision/main/generated/torchvision.transforms.RandomAffine.html
               degrees: 0
-              translate: (0.1,0.1)  # (tx, ty) ou (tx_min, tx_max, ty_min, ty_max)
+              translate: (0.1,0.1)  # (tx, ty) or (tx_min, tx_max, ty_min, ty_max)
               scale: (0.9,1.10)
           colorjitter:
               saturation: (0.10,0.50)
               hue: (0.10,0.50)
 
 # Feature extraction
-# L'extracteur est utilisé pour produire les features envoyées à la tête de
-# classification. Choix : MiewID | MegaDescriptor | ResNet152 | ResNet50
-# `last_layer` : nom logique de la dernière couche AVANT la classification
-#                (le vecteur de features est la sortie de cette couche).
-# `last_frozen_layer` : nom logique de la dernière couche qui reste gelée ;
-#                toutes les couches comprises entre elle et `last_layer` sont
-#                fine-tunées à partir de `defreeze_epoch`.
-#                "null" => fine-tuning complet.
+# The extractor is used to produce the features sent to the classification head.
+# Choices: MiewID | MegaDescriptor | ResNet152 | ResNet50
+# `last_layer`: logical name of the last layer BEFORE classification
+#                (the feature vector is the output of this layer).
+# `last_frozen_layer`: logical name of the last layer that remains frozen;
+#                all layers between it and `last_layer` are
+#                fine-tuned from `defreeze_epoch`.
+#                "null" => no fine-tuning.
 feature_extractor:
-    name: "ResNet50"  # MiewID, MegaDescriptor, ResNet152
+    name: "ResNet50"
     last_layer: null              # output from last_layer
-    last_frozen_layer: "layer3"   # layer4 fine-tuned (at defreeze epoch) layer3 and all sons freezed backbone.blocks.5.10
+    last_frozen_layer: "layer3"
 
 training_parameters:
     batch_size: 64
     num_epoch: 3
     lr: 0.001 #0.5 	0.05 	0.005 	0.001 	0.0005 	0.0001 	0.00005
     pretrained: true
-    aug_epoch: 2      #epoch (1-based) à partir de laquelle l'augmentation est appliquée
+    aug_epoch: 2      #epoch (1-based) from which augmentation is applied
     defreeze_epoch: 3 #epoch after which layers are unfreeze for training feature extractor
-    early_stopping: 1.0 #MIN_ACC_IMPROVEMENTS = [1.0, 2.0, 5.0, 10.0]
+    early_stopping: 1.0
     num_workers: 0
     seed: 42
     classification_head: "ClassificationHead"
@@ -110,9 +106,3 @@ similarity_research:
 paths:
   videos: "data/raw/indiv_videos"
   output: "data/results"
-
-
-scripts:
-  precompute: "scripts/precompute_features.py"
-  train: "scripts/train_classifier.py"
-  evaluate: "scripts/evaluate.py"

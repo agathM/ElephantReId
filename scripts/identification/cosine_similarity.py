@@ -1,35 +1,34 @@
 """
-Recherche par similarité cosinus après l'entraînement.
+Cosine similarity search after training.
 
-Ce script est prévu pour être exécuté APRÈS `train_classifier.py`. Il :
+1. Two options : loads the backbone of the fine-tuned models saved in
+   `<out_dir>/models`;
+   if no model was saved (no fine-tuning), uses the
+   pretrained backbone with the same settings as `train_classifier.py`;
 
-1. charge le backbone des modèles fine-tunés sauvegardés dans
-   `<out_dir>/models` ; si aucun modèle n'a été sauvegardé (aucun
-   fine-tuning), utilise le backbone pré-entraîné avec les mêmes réglages
-   que `train_classifier.py` ;
-2. reconstruit le split du run correspondant ;
-3. calcule les features du train et de la validation avec le même
-   prétraitement que l'entraînement (sans augmentation) ;
-4. pour chaque crop de validation, cherche les `num_points` features
-   d'entraînement les plus proches (similarité cosinus) ;
-5. prédit le label par vote majoritaire parmi ces voisins ;
-6. écrit les prédictions dans `<out_dir>/val_pred.csv`.
+2. rebuilds the split of the runs;
+3. computes train and validation features with the same preprocessing as
+   training (without augmentation);
+4. for each validation crop, finds the `num_points` closest training
+   features (cosine similarity);
+5. predicts the label by majority vote among these neighbours;
+6. writes the predictions to `<out_dir>/val_pred.csv`.
 
-Le nombre de voisins est lu dans `similarity_research.num_points` du fichier
-`pipeline.yaml`. Il peut être surchargé par `--num-points`.
+The number of neighbours is read from `similarity_research.num_points` in the
+`pipeline.yaml` file. It can be overridden with `--num-points`.
 
 USAGE
 -----
     python -m scripts.identification.cosine_similarity \
         -c config/pipeline.yaml --out-dir data/results/v1
 
-ou, depuis `pipeline.py`, via `run_similarity(args)`.
+or, from `pipeline.py`, via `run_similarity(args)`.
 """
 
 from __future__ import annotations
 
 import argparse
-import math
+import os.path
 import sys
 from pathlib import Path
 
@@ -38,8 +37,6 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 
-# Le script doit pouvoir être importé comme
-# `scripts.identification.cosine_similarity` ou exécuté directement.
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
@@ -50,10 +47,10 @@ CHUNK_SIZE = 2048
 OUTPUT_NAME = "val_cosine_similarity_pred.csv"
 
 # ============================================================
-# PRÉPARATION DES DONNÉES
+# DATA PREPARATION
 # ============================================================
 def load_run_tables(args: argparse.Namespace, run):
-    """Charge les tables et reconstruit le split du run médian."""
+    """Load the tables and rebuild the run split."""
     splits_df = getattr(args, "splits_df", None)
     images_df = getattr(args, "images_df", None)
 
@@ -78,7 +75,7 @@ def build_datasets_and_metadata(
     label_map: dict,
     run,
 ):
-    """Construit les datasets train/val et les métadonnées de validation."""
+    """Build the train/val datasets and the validation metadata."""
     crop_dir = Path(args.crop_path)
     detection_model_map = train_classifier.build_detection_model_map(crop_dir)
 
@@ -105,9 +102,8 @@ def build_datasets_and_metadata(
             f"(train={len(train_df)}, val={len(val_df)})."
         )
 
-    # On conserve toutes les métadonnées utiles du split (caméra, mode,
-    # entry_day, etc.). Les colonnes réécrites par la prédiction sont
-    # exclues pour éviter tout doublon.
+    # Keep all useful split metadata (camera, mode, entry_day, etc.).
+    # Columns overwritten by the prediction are excluded to avoid duplicates.
     reserved_columns = {"run", "pred_label", "margin", "logits", "conf"}
     metadata_columns = [
         column
@@ -144,18 +140,18 @@ def build_datasets_and_metadata(
 
 
 # ============================================================
-# MODÈLE / FEATURES
+# MODEL / FEATURES
 # ============================================================
 def build_feature_model(
     checkpoint: dict,
     args: argparse.Namespace,
     device: torch.device,
 ):
-    """Reconstruit le backbone du modèle médian et son prétraitement.
+    """Rebuild the model backbone and its preprocessing.
 
-    Si le checkpoint ne contient pas de ``backbone_state_dict`` (cas d'un
-    modèle non fine-tuné, donc non sauvegardé), le backbone est chargé avec
-    ses poids pré-entraînés.
+    If the checkpoint does not contain a ``backbone_state_dict`` (case of a
+    non-fine-tuned model, therefore not saved), the backbone is loaded with
+    its pretrained weights.
     """
     feature_extractor = checkpoint["feature_extractor"]
     if feature_extractor not in train_classifier.ARCHITECTURES:
@@ -199,7 +195,7 @@ def compute_features(
     args: argparse.Namespace,
     device: torch.device,
 ):
-    """Calcule les features train et validation."""
+    """Compute train and validation features."""
     train_features = train_classifier.compute_features(
         feature_model,
         train_dataset,
@@ -218,7 +214,7 @@ def compute_features(
 
 
 # ============================================================
-# RECHERCHE DES VOISINS ET VOTE MAJORITAIRE
+# NEIGHBOUR SEARCH AND MAJORITY VOTE
 # ============================================================
 def topk_majority_vote(
     val_features: torch.Tensor,
@@ -228,16 +224,16 @@ def topk_majority_vote(
     num_classes: int,
     device: torch.device,
 ) -> dict:
-    """Cherche les `num_points` voisins cosinus et vote par majorité.
+    """Find the `num_points` cosine neighbours and vote by majority.
 
     Returns
     -------
     dict
         - pred : np.ndarray (n_val,)
-        - conf : np.ndarray (n_val,) fraction de votes de la classe gagnante
-        - margin : np.ndarray (n_val,) écart entre les deux meilleurs votes
+        - conf : np.ndarray (n_val,) vote fraction of the winning class
+        - margin : np.ndarray (n_val,) gap between the two best votes
         - vote_fractions : np.ndarray (n_val, num_classes)
-        - top_labels : np.ndarray (n_val, k) labels des voisins
+        - top_labels : np.ndarray (n_val, k) neighbour labels
         - top_similarities : np.ndarray (n_val, k)
     """
     n_train = train_features.shape[0]
@@ -304,7 +300,7 @@ def topk_majority_vote(
 
 
 # ============================================================
-# CONSTRUCTION DU val_pred.csv
+# BUILDING val_pred.csv
 # ============================================================
 def build_prediction_df(
     run,
@@ -312,7 +308,7 @@ def build_prediction_df(
     val_metadata: list,
     results: dict,
 ) -> pd.DataFrame:
-    """Construit le DataFrame de prédictions de validation."""
+    """Build the validation prediction DataFrame."""
     rows = []
     k = results["top_labels"].shape[1]
 
@@ -361,7 +357,7 @@ def build_prediction_df(
 # ORCHESTRATION
 # ============================================================
 def get_num_points(args: argparse.Namespace) -> int:
-    """Lit `similarity_research.num_points` (ou la surcharge CLI)."""
+    """Read `similarity_research.num_points` (or the CLI override)."""
     override = getattr(args, "num_points", None)
     if override is not None:
         return max(1, int(override))
@@ -376,23 +372,8 @@ def get_num_points(args: argparse.Namespace) -> int:
     return max(1, int(similarity_config.get("num_points", 1)))
 
 
-def load_saved_checkpoints(model_dir: Path) -> list[dict]:
-    """Charge les checkpoints fine-tunés de ``model_dir`` (hors médian)."""
-    if not model_dir.exists():
-        return []
-
-    checkpoints = []
-    for model_path in sorted(model_dir.iterdir()):
-        if model_path.suffix != ".pth" or model_path.name == "median_model.pth":
-            continue
-        checkpoints.append(
-            torch.load(model_path, map_location="cpu", weights_only=False)
-        )
-    return checkpoints
-
-
 def get_runs(args: argparse.Namespace) -> list:
-    """Retourne les runs du fichier de splits."""
+    """Return the runs from the splits file."""
     splits_df = getattr(args, "splits_df", None)
     if splits_df is None:
         if not getattr(args, "split_file", None):
@@ -402,27 +383,30 @@ def get_runs(args: argparse.Namespace) -> list:
 
 
 def build_pretrained_checkpoint(args: argparse.Namespace) -> dict:
-    """Checkpoint factice décrivant le backbone pré-entraîné.
+    """Dummy checkpoint describing the pretrained backbone.
 
-    Utilisé quand aucun poids n'a été sauvegardé (modèle non fine-tuné).
+    Used when no weights were saved (non-fine-tuned model).
     """
     return {
         "feature_extractor": args.feature_extractor,
         "last_layer": args.last_layer,
         "last_frozen_layer": args.last_frozen_layer,
-        # None => build_feature_model charge les poids pré-entraînés.
+        # None => build_feature_model loads the pretrained weights.
         "backbone_state_dict": None,
     }
 
 
-def run_similarity(args: argparse.Namespace) -> pd.DataFrame:
-    """Exécute la recherche cosinus sur les modèles fine-tunés.
+def run_similarity(
+    args: argparse.Namespace,
+    pretrained_only: bool = False,
+) -> pd.DataFrame:
+    """Run cosine search on the fine-tuned models.
 
-    Si aucun modèle n'a été sauvegardé (aucun fine-tuning), le backbone
-    pré-entraîné est utilisé pour tous les runs du fichier de splits.
+    If ``pretrained_only`` is true or if no model was saved (no fine-tuning),
+    the pretrained backbone is used for all runs of the splits file.
 
-    `args` doit contenir au minimum `out_dir`, `crop_path` et les tables
-    `splits_df` / `images_df` (ou `split_file` / `crop_file`).
+    `args` must contain at least `out_dir`, `crop_path` and the
+    `splits_df` / `images_df` tables (or `split_file` / `crop_file`).
     """
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -435,28 +419,21 @@ def run_similarity(args: argparse.Namespace) -> pd.DataFrame:
         or ("cuda" if torch.cuda.is_available() else "cpu")
     )
     model_dir = Path(args.out_dir) / "models"
-
-    checkpoints = load_saved_checkpoints(model_dir)
-    if checkpoints:
-        jobs = [(checkpoint["run"], checkpoint) for checkpoint in checkpoints]
-    else:
-        print(
-            "Aucun modèle fine-tuné trouvé dans "
-            f"{model_dir} : utilisation du backbone pré-entraîné."
-        )
-        pretrained_checkpoint = build_pretrained_checkpoint(args)
-        jobs = [
-            (run, pretrained_checkpoint) for run in get_runs(args)
-        ]
+    runs = get_runs(args)
 
     cosine_results = []
-    for run, checkpoint in jobs:
+    for run in runs:
+        model_path = model_dir / f"model_run_{run}.pth"
+        if os.path.exists(model_path):
+            checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+        else:
+            checkpoint = build_pretrained_checkpoint(args)
         num_points = get_num_points(args)
 
         df = load_run_tables(args, run)
 
         if checkpoint.get("backbone_state_dict") is None:
-            # Modèle pré-entraîné : les classes proviennent du run.
+            # Pretrained model: classes come from the run.
             class_names = sorted(
                 str(name) for name in df["label"].unique()
             )
@@ -533,8 +510,8 @@ def run_similarity(args: argparse.Namespace) -> pd.DataFrame:
 # CLI
 # ============================================================
 def build_parser() -> argparse.ArgumentParser:
-    # On réutilise le parser de train_classifier pour que `resolve_args()`
-    # dispose de tous les champs attendus (feature_extractor, transforms...).
+    # Reuse the train_classifier parser so that `resolve_args()` has all the
+    # expected fields (feature_extractor, transforms...).
     parser = train_classifier.build_parser()
     parser.description = (
         "Prédiction par similarité cosinus avec le backbone du modèle "

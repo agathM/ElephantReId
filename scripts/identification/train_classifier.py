@@ -1,38 +1,35 @@
 """
-Entraînement modulaire d'une tête de classification (ClassificationHead) sur
-un extracteur de features (MiewID / MegaDescriptor / ResNet152).
+Modular training of a classification head (ClassificationHead) on top of a
+feature extractor (MiewID / MegaDescriptor / ResNet152).
 
-PRINCIPES
----------
-* La tête de classification est la classe `ClassificationHead` déjà codée dans
-  `scripts/network.py` : elle est importée, pas réécrite.
-* La loss est une CrossEntropy.
-* L'extracteur de features peut être :
-    - entièrement gelé (extraction de features à la volée) ;
-    - partiellement fine-tuné : les couches comprises ENTRE `last_frozen_layer`
-      et `last_layer` sont entraînées à partir de `defreeze_epoch`.
-* L'augmentation de données (RandomAffine + ColorJitter) est appliquée À LA
-  VOLÉE par le DataLoader à partir de `aug_epoch` : chaque image est
-  re-transformée à chaque epoch (comportement PyTorch classique, aucun
-  pré-calcul, rien n'est enregistré sur disque).
-* Le nombre de runs est celui présent dans le fichier de splits.
+PRINCIPLES
+----------
+* The classification head is the `ClassificationHead` class already defined
+  in `scripts/network.py`: it is imported, not rewritten.
+* The loss is a CrossEntropy.
+* The feature extractor can be:
+    - fully frozen (on-the-fly feature extraction);
+    - partially fine-tuned: the layers between `last_frozen_layer` and
+      `last_layer` are trained from `defreeze_epoch`.
+* Data augmentation (RandomAffine + ColorJitter) is applied ON THE FLY by the
+  DataLoader from `aug_epoch`: each image is re-transformed at every epoch
+  (standard PyTorch behaviour, no pre-computation, nothing is saved to disk).
+* The number of runs is the one present in the splits file.
 
 USAGE
 -----
     python -m scripts.train_classifier -c config/pipeline.yaml \
         --feature-extractor ResNet152 --last-layer fc --last-frozen-layer layer3
 
-ou, depuis `pipeline.py`, via `run_training(args)`.
+or, from `pipeline.py`, via `run_training(args)`.
 
-SORTIES (dans `--out-dir`)
---------------------------
-    train_curv_run_<run>.png   courbes loss / accuracy du run
-    model_run_<run>.pth        poids du modèle à l'epoch d'arrêt (early stopping)
-    median_model.pth           seul modèle conservé : celui dont la val accuracy
-                               est la plus proche de la médiane des runs
-    val_pred_early_stop.csv    prédictions à l'epoch d'arrêt,
-                               complétées après chaque run (append)
-    runs_summary.csv           métriques par run (train_acc, val_acc, ...)
+OUTPUTS (in `--out-dir`)
+------------------------
+    train_curv_run_<run>.png   loss / accuracy curves for the run
+    model_run_<run>.pth        model weights at the stop epoch (early stopping)
+    val_pred_early_stop.csv    predictions at the stop epoch,
+                               appended after each run
+    runs_summary.csv           per-run metrics (train_acc, val_acc, ...)
 """
 
 from __future__ import annotations
@@ -64,8 +61,8 @@ from torch.utils.data import DataLoader, Dataset, TensorDataset  # noqa: E402
 from torchvision import transforms  # noqa: E402
 
 # ============================================================
-# BOOTSTRAP : le script doit pouvoir être importé comme
-# `scripts.train_classifier` (racine du dépôt dans sys.path)
+# BOOTSTRAP: the script must be importable as
+# `scripts.train_classifier` (repository root in sys.path)
 # ============================================================
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -78,62 +75,39 @@ from network import ClassificationHead  # noqa: E402
 
 
 # ============================================================
-# TABLE DE CORRESPONDANCE  last_layer / last_frozen_layer
+# MAPPING TABLE  last_layer / last_frozen_layer
 # ------------------------------------------------------------
-# C'est ICI que l'on remplit la correspondance entre le NOM LOGIQUE
-# choisi sur la ligne de commande (--last-layer / --last-frozen-layer)
-# et le module RÉEL du modèle.
-#
-#   "module" : chemin du module dans le modèle ("fc" = model.fc,
-#              "head.global_pool" = model.head.global_pool)
-#   "take"   : "output" -> on prend la SORTIE du module
-#              "input"  -> on prend l'ENTRÉE du module
-#                          (= sortie de la couche précédente)
-#
-# `last_layer` doit désigner la dernière couche AVANT la classification :
-#   - "output" : la sortie du module EST le vecteur de features ;
-#   - "input"  : l'entrée du module de classification EST le vecteur
-#                de features (ex. l'entrée de model.fc pour ResNet).
-#
-# ATTENTION MiewID : le forward() de MiewIdNet s'arrête AVANT `final`
-# (la couche de classification) : `final` n'est donc jamais appelé et ne
-# peut pas être capturé par un hook. Il faut utiliser "bn" (take=output).
+# This is where the mapping is filled between the LOGICAL NAME chosen on
+# the command line (--last-layer / --last-frozen-layer) and the ACTUAL
+# module of the model.
 # ============================================================
-# par défault : on prend tjs l'output de la couche
 LAYER_MAPPING: dict[str, dict[str, dict[str, str]]] = {
     "ResNet152": {
         "layer1": {"module": "layer1"},
         "layer2": {"module": "layer2"},
-        "layer3": {"module": "layer3"}, # de layer3.0.relu layer3.35.relu
-        "layer4": {"module": "layer4"}, # de layer4.0.relu à layer4.2.relu -> ajouter avgpool
+        "layer3": {"module": "layer3"}, # from layer3.0.relu to layer3.35.relu
+        "layer4": {"module": "layer4"}, # from layer4.0.relu to layer4.2.relu -> add avgpool
         "avgpool": {"module": "avgpool"},
     },
-    "ResNet50": {   #16 blocks et dans chaque block 3 couches de convolution suivi de batch normalization puis relu à la fin
+    "ResNet50": {   # 16 blocks, each block has 3 convolution layers followed by batch normalization then relu at the end
         "layer1": {"module": "layer1"},
         "layer2": {"module": "layer2"},
-        "layer3": {"module": "layer3"},  # de layer3.0.relu layer3.5.relu
-        "layer4": {"module": "layer4"},  # de layer4.0.relu à layer4.2.relu -> ajouter avgpool
+        "layer3": {"module": "layer3"},  # from layer3.0.relu to layer3.5.relu
+        "layer4": {"module": "layer4"},  # from layer4.0.relu to layer4.2.relu -> add avgpool
         "avgpool": {"module": "avgpool"},
     },
     "MegaDescriptor": {
         "norm": {"module": "norm"},
     },
-    "MiewID": {                     #0 	3 	6 	15 	30 	60 	90 	120 	150 	180 unfreezing layers
-        "bn": {"module": "bn"},     #backbone.blocks.5.9,  backbone.blocks.4.9, backbone.blocks.3.7, backbone.blocks.3.0 -> test simple regarde pas activations au sein des blocks
+    "MiewID": {                     # 0 	3 	6 	15 	30 	60 	90 	120 	150 	180 unfreezing layers
+        "bn": {"module": "bn"},     # backbone.blocks.5.9, backbone.blocks.4.9, backbone.blocks.3.7, backbone.blocks.3.0 -> simple test does not look at activations within blocks
     },
 }
-# for name, param in model.named_parameters():
-#     param.requires_grad = False
-#
-# for name, param in model.named_parameters():
-#     if name.startswith("backbone.blocks.4.6.") or \
-#        name.startswith("backbone.blocks.4.7."):
-#         param.requires_grad = True
 
 # ============================================================
-# REGISTRE DES EXTRACTEURS DE FEATURES
+# FEATURE EXTRACTOR REGISTRY
 # ------------------------------------------------------------
-# input_size / mean / std : prétraitement attendu par chaque modèle.
+# input_size / mean / std: preprocessing expected by each model.
 # ============================================================
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -180,23 +154,16 @@ FEATURE_EXTRACTORS = list(ARCHITECTURES.keys())
 
 
 # ============================================================
-# OUTILS GÉNÉRIQUES
+# GENERIC UTILITIES
 # ============================================================
 def set_seed(seed: int) -> None:
-    """Fixe toutes les graines (torch, numpy, random)."""
+    """Set all seeds (torch, numpy, random)."""
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-
-
-
-# Prétraitements disponibles : les fonctions sont définies dans
-# `image_preprocessing.py` et résolues par leur nom. `None` = pas de
-# prétraitement.
-
 
 
 def resolve_preprocessing(name) -> Callable | None:
@@ -207,11 +174,11 @@ def resolve_preprocessing(name) -> Callable | None:
 
     key = str(name).strip()
 
-    # Import paresseux : `image_preprocessing` n'est chargé que si besoin.
+    # Lazy import: `image_preprocessing` is only loaded if needed.
     try:
         from scripts.identification import image_preprocessing
     except ModuleNotFoundError:
-        import image_preprocessing  # exécution directe du script
+        import image_preprocessing  # direct script execution
 
     function = getattr(image_preprocessing, key, None)
 
@@ -230,11 +197,11 @@ def resolve_preprocessing(name) -> Callable | None:
 
 
 def _parse_sequence(value) -> list | None:
-    """Normalise un paramètre YAML en liste de nombres.
+    """Normalize a YAML parameter into a list of numbers.
 
-    Le YAML ne reconnaît pas les tuples : `(0.1, 0, 1)` est chargé comme
-    une CHAINE. On accepte donc indifféremment une liste, un tuple, un
-    nombre ou une chaîne du type "(0.1, 0, 1)" / "[0.9, 1.10]".
+    YAML does not recognize tuples: `(0.1, 0, 1)` is loaded as a STRING.
+    We therefore accept either a list, a tuple, a number or a string such as
+    "(0.1, 0, 1)" / "[0.9, 1.10]".
     """
     if value is None:
         return None
@@ -263,14 +230,14 @@ def _parse_sequence(value) -> list | None:
 
 
 def _normalize_translate(translate) -> tuple | None:
-    """Normalise le paramètre `translate` de RandomAffine.
+    """Normalize the `translate` parameter of RandomAffine.
 
-    Accepte :
+    Accepts:
         - None                      -> None
         - (tx, ty)                 -> (tx, ty)
-        - (tx_min, tx_max, ty_min, ty_max) -> tel quel
-    Un triplet est interprété comme (tx, ty) (la 3e valeur est ignorée, un
-    avertissement est affiché).
+        - (tx_min, tx_max, ty_min, ty_max) -> as is
+    A triplet is interpreted as (tx, ty) (the 3rd value is ignored, a
+    warning is displayed).
     """
     values = _parse_sequence(translate)
     if values is None:
@@ -283,7 +250,7 @@ def _normalize_translate(translate) -> tuple | None:
 
 
 def _normalize_scale(scale) -> tuple | float | None:
-    """Normalise le paramètre `scale` de RandomAffine."""
+    """Normalize the `scale` parameter of RandomAffine."""
     values = _parse_sequence(scale)
     if values is None:
         return None
@@ -295,7 +262,7 @@ def _normalize_scale(scale) -> tuple | float | None:
 
 
 def _normalize_jitter_value(value):
-    """Normalise un paramètre de ColorJitter (nombre ou intervalle)."""
+    """Normalize a ColorJitter parameter (number or interval)."""
     values = _parse_sequence(value)
     if values is None:
         return None
@@ -310,13 +277,13 @@ def build_augmentation(
     params: dict | None,
     aug_flags: dict | None = None,
 ) -> transforms.Compose | None:
-    """Construit l'augmentation RandomAffine + ColorJitter depuis le YAML.
+    """Build the RandomAffine + ColorJitter augmentation from the YAML.
 
-    `params` = contenu de `data_augmentation.torch_transformation`
-    (ou `data_transformation.params` pour compatibilité).
-    `aug_flags` = dict issu de `pipeline.AUG_PARAMS` (clés
+    `params` = contents of `data_augmentation.torch_transformation`
+    (or `data_transformation.params` for compatibility).
+    `aug_flags` = dict from `pipeline.AUG_PARAMS` (keys
     ``rotation``, ``translation``, ``scaling``, ``saturation``, ``hue``).
-    Seules les transformations dont le flag est ``True`` sont appliquées.
+    Only transformations whose flag is ``True`` are applied.
     """
     if not params:
         return None
@@ -376,9 +343,9 @@ def build_input_transform(
     std: tuple,
     padding: int | None,
 ) -> transforms.Compose:
-    """Pipeline image : prétraitement -> augmentation -> resize -> tensor.
+    """Image pipeline: preprocessing -> augmentation -> resize -> tensor.
 
-    L'augmentation est appliquée AVANT le redimensionnement (sur l'image PIL).
+    Augmentation is applied BEFORE resizing (on the PIL image).
     """
     operations = []
 
@@ -480,11 +447,11 @@ class ImageCropDataset(Dataset):
 
 
 # ============================================================
-# BACKBONE : construction, extraction des features, gel/dégel
+# BACKBONE: construction, feature extraction, freeze/unfreeze
 # ============================================================
 @dataclass
 class Backbone:
-    """Extracteur de features + métadonnées d'architecture."""
+    """Feature extractor + architecture metadata."""
 
     name: str
     model: nn.Module
@@ -496,7 +463,7 @@ class Backbone:
 
 
 def build_backbone(name: str, pretrained: bool = True) -> Backbone:
-    """Construit l'extracteur de features demandé."""
+    """Build the requested feature extractor."""
     if name not in ARCHITECTURES:
         raise ValueError(
             f"Extracteur inconnu : {name} "
@@ -532,7 +499,7 @@ def build_backbone(name: str, pretrained: bool = True) -> Backbone:
                 "pré-entraîné (pretrained=False n'est pas supporté)."
             )
 
-    else:  # pragma: no cover - Impossible d'atteindre ce cas
+    else:      # pragma: no cover - unreachable case
         raise ValueError(name)
 
     model.eval()
@@ -549,10 +516,10 @@ def build_backbone(name: str, pretrained: bool = True) -> Backbone:
 
 
 def _is_after(key: tuple, frozen_key: tuple) -> bool:
-    """Vrai si le module de rang `key` est situé APRÈS le module gelé.
+    """True if the module with rank `key` is located AFTER the frozen module.
 
-    Les descendants du module gelé (par exemple les bottlenecks de "layer3")
-    ne sont PAS considérés comme postérieurs : ils restent gelés.
+    Descendants of the frozen module (for example the bottlenecks of
+    "layer3") are NOT considered as after it: they remain frozen.
     """
     if key <= frozen_key:
         return False
@@ -560,7 +527,7 @@ def _is_after(key: tuple, frozen_key: tuple) -> bool:
 
 
 def resolve_module(model: nn.Module, path: str) -> nn.Module:
-    """Résout un chemin de module ("head.global_pool" -> model.head.global_pool)."""
+    """Resolve a module path ("head.global_pool" -> model.head.global_pool)."""
     module = model
     for part in path.split("."):
         if not part:
@@ -579,12 +546,11 @@ def extract_features(
     x: torch.Tensor,
     module_path: str,
 ) -> torch.Tensor:
-    """Retourne la sortie d'un module donné du modèle.
+    """Return the output of a given module of the model.
 
-    Un hook est posé sur le module pour récupérer sa sortie
-    pendant le forward complet du modèle. Le tenseur retourné fait partie du
-    graphe : les gradients peuvent donc remonter jusqu'aux couches
-    fine-tunées.
+    A hook is placed on the module to retrieve its output during the full
+    model forward pass. The returned tensor is part of the graph: gradients
+    can therefore flow back to the fine-tuned layers.
     """
     module = resolve_module(model, module_path)
     captured: dict = {}
@@ -608,13 +574,13 @@ def extract_features(
 
 
 class FeatureModel(nn.Module):
-    """Enveloppe l'extracteur de features.
+    """Wrap the feature extractor.
 
-    * `forward(x)` renvoie le vecteur de features (sortie de `last_layer`).
-    * `set_trainable(flag)` active / désactive le fine-tuning des couches
-      comprises entre `last_frozen_layer` et `last_layer`.
-    * `set_mode(training)` met le modèle en mode train (BatchNorm) pour les
-      seules couches fine-tunées, et en mode eval pour les autres.
+    * `forward(x)` returns the feature vector (output of `last_layer`).
+    * `set_trainable(flag)` enables / disables fine-tuning of the layers
+      between `last_frozen_layer` and `last_layer`.
+    * `set_mode(training)` puts the model in train mode (BatchNorm) for the
+      fine-tuned layers only, and in eval mode for the others.
     """
 
     def __init__(
@@ -641,9 +607,9 @@ class FeatureModel(nn.Module):
             )
 
         # --------------------------------------------------
-        # Couches fine-tunables : entre last_frozen_layer et
-        # last_layer (bornes comprises), la couche de classification
-        # d'origine n'est jamais entraînée (remplacée par la tête).
+        # Fine-tunable layers: between last_frozen_layer and
+        # last_layer (bounds included); the original classification
+        # layer is never trained (replaced by the head).
         # --------------------------------------------------
         self._trainable_modules = self._compute_trainable_modules()
         self._candidate_parameters = []
@@ -658,8 +624,8 @@ class FeatureModel(nn.Module):
             if name == self.last_layer:
                 break
 
-        # Tout est gelé par défaut : le dégel est piloté par `set_trainable`
-        # (epoch `defreeze_epoch`).
+        # Everything is frozen by default: unfreezing is driven by
+        # `set_trainable` (epoch `defreeze_epoch`).
         for parameter in self.model.parameters():
             parameter.requires_grad_(False)
 
@@ -667,11 +633,11 @@ class FeatureModel(nn.Module):
 
     # ------------------------------------------------------------
     def _module_order_keys(self) -> dict:
-        """Associe à chaque module son "rang" dans l'ordre d'exécution.
+        """Associate each module with its "rank" in execution order.
 
-        Le rang est le tuple des INDICES d'enfants depuis la racine :
+        The rank is the tuple of CHILD INDICES from the root:
         ("conv1",) -> (0,), ("layer4",) -> (7,), ("layer4.2.conv1",) -> (7, 2, 0).
-        La comparaison de deux rangs donne l'ordre d'exécution.
+        Comparing two ranks gives the execution order.
         """
         keys = {}
 
@@ -689,10 +655,10 @@ class FeatureModel(nn.Module):
         return keys[layer_name]
 
     def _compute_trainable_modules(self) -> list:
-        """Modules à fine-tuner (last_frozen_layer exclus, last_layer_inclus).
+        """Modules to fine-tune (last_frozen_layer excluded, last_layer included).
 
-        Le fine-tuning porte sur tous les modules situés APRÈS
-        `last_frozen_layer` et JUSQU'À `last_layer` (inclus).
+        Fine-tuning applies to all modules located AFTER `last_frozen_layer`
+        and UP TO `last_layer` (included).
         """
         keys = self._module_order_keys()
         key_last = self._order_key(self.last_layer)
@@ -715,12 +681,12 @@ class FeatureModel(nn.Module):
 
         selected = []
         for path, key in in_range.items():
-            parent = ".".join(path.split(".")[:-1]) #layer parent de path
-            if parent and parent in in_range: #si parent est dans in_range pas besoin de l'ajouter car le parent couvre les enfants
+            parent = ".".join(path.split(".")[:-1]) # parent layer of path
+            if parent and parent in in_range: # if the parent is in in_range, no need to add it since the parent covers its children
                 continue
             selected.append((path, key))
 
-        selected.sort(key=lambda item: item[1]) #trie par ordre croissant
+        selected.sort(key=lambda item: item[1]) # sort in ascending order
 
         return [
             resolve_module(self.model, path) for path, _ in selected
@@ -745,21 +711,21 @@ class FeatureModel(nn.Module):
 
     @property
     def trainable_parameters(self) -> list:
-        """Paramètres potentiellement fine-tunés (selon l'epoch)."""
+        """Parameters potentially fine-tuned (depending on the epoch)."""
         return self._candidate_parameters
 
     def set_trainable(self, trainable: bool) -> None:
-        """Active / désactive le fine-tuning du backbone."""
+        """Enable / disable fine-tuning of the backbone."""
         for parameter in self._candidate_parameters:
             parameter.requires_grad_(trainable)
 
     def set_mode(self, training: bool) -> None:
-        """Mode train/eval : seules les couches fine-tunées passent en
-        mode train (BatchNorm), les autres restent en mode eval.
+        """Train/eval mode: only the fine-tuned layers are switched to
+        train mode (BatchNorm), the others stay in eval mode.
 
-        Tant que le backbone est gelé (avant `defreeze_epoch`), les
-        statistiques des BatchNorm restent figées : les features ne
-        changent pas d'une epoch à l'autre.
+        As long as the backbone is frozen (before `defreeze_epoch`), the
+        BatchNorm statistics remain fixed: features do not change from one
+        epoch to another.
         """
         self.model.eval()
         if training:
@@ -768,7 +734,7 @@ class FeatureModel(nn.Module):
                     module.train()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        #check si besoin de grad er flatten pour avant la classification Head -> avgpool?
+        # check whether grad is needed and flatten before the classification head -> avgpool?
         if any(p.requires_grad for p in self._candidate_parameters):
             features = extract_features(
                 self.model, x, self.last_layer
@@ -784,7 +750,7 @@ class FeatureModel(nn.Module):
 
 
 # ============================================================
-# ENTRAÎNEMENT
+# TRAINING
 # ============================================================
 
 def save_train_curves(
@@ -887,49 +853,49 @@ def train_one_run(
     lr: float = 1e-3,
     defreeze_epoch: int | None = None,
     min_acc_improvement: float | None = 1.0,
+    aug_epoch: int | None = None,
 ):
-    """Entraîne la tête de classification (et éventuellement le backbone).
+    """Train the classification head (and optionally the backbone).
 
-    `make_train_loader(epoch, frozen)` (epoch 1-based) renvoie un DataLoader
-    pour l'epoch donnée. Son dataset produit des couples (tensor, label) :
-        - features pré-calculées (TensorDataset) quand le backbone est gelé
-          ET l'augmentation n'est pas encore active : elles sont calculées
-          une seule fois (le backbone étant figé, elles restent valides) ;
-        - images (ImageCropDataset, ``needs_backbone=True``) sinon : le
-          backbone calcule les features de chaque batch à la volée, ce qui est
-          indispensable dès que l'augmentation est active ou que le backbone
-          est fine-tuné (sinon les features seraient obsolètes).
+    `make_train_loader(epoch, frozen)` (1-based epoch) returns a DataLoader
+    for the given epoch. Its dataset yields (tensor, label) pairs:
+        - pre-computed features (TensorDataset) when the backbone is frozen
+          AND augmentation is not yet active: they are computed once (the
+          backbone being frozen, they remain valid);
+        - images (ImageCropDataset, ``needs_backbone=True``) otherwise: the
+          backbone computes the features of each batch on the fly, which is
+          required as soon as augmentation is active or the backbone is
+          fine-tuned (otherwise features would be stale).
 
-    L'entraînement parcourt TOUS les epochs (num_epoch) : les courbes sont
-    collectées pour décider après coup de l'epoch d'arrêt. Si
-    `min_acc_improvement` est renseigné, l'arrêt correspond à la première
-    epoch dont l'amélioration d'accuracy train passe sous le seuil. S'il vaut
-    `None`, aucun early stopping n'est appliqué et l'arrêt correspond à la
-    dernière epoch.
+    Training goes through ALL epochs (num_epoch): curves are collected to
+    decide the stop epoch afterwards. If `min_acc_improvement` is set, the
+    stop corresponds to the first epoch whose train accuracy improvement
+    falls below the threshold. If it is `None`, no early stopping is applied
+    and the stop corresponds to the last epoch.
 
     Returns
     -------
     dict
-        - train_error / val_error : list[float] (loss par epoch)
-        - train_accuracy / val_accuracy : list[float] (accuracy % par epoch)
+        - train_error / val_error : list[float] (loss per epoch)
+        - train_accuracy / val_accuracy : list[float] (accuracy % per epoch)
         - early_stop_predictions : list[dict]
-            Prédictions de validation à l'epoch d'arrêt (ou de la dernière
-            epoch si aucun arrêt n'est déclenché).
+            Validation predictions at the stop epoch (or the last epoch if
+            no stop is triggered).
         - stop_epoch : int
-            Indice (0-based) de l'epoch d'arrêt.
+            Index (0-based) of the stop epoch.
         - is_finetuned : bool
-            Vrai si le backbone était réellement fine-tuné (au moins un
-            paramètre entraînable) à l'epoch d'arrêt.
+            True if the backbone was actually fine-tuned (at least one
+            trainable parameter) at the stop epoch.
         - model_dict / backbone_state_dict
-            Poids sauvegardés À L'EPOCH D'ARRÊT.
+            Weights saved AT THE STOP EPOCH.
     """
 
     set_seed(seed)
     stop_epoch = None
     stop_head_state = None
     stop_backbone_state = None
-    # Vrai si le backbone était réellement fine-tuné (au moins un paramètre
-    # entraînable) à l'epoch d'arrêt. Utilisé avant la sauvegarde des poids.
+    # True if the backbone was actually fine-tuned (at least one trainable
+    # parameter) at the stop epoch. Used before saving the weights.
     stop_is_finetuned = False
     dim_in = backbone._feature_dim
     head = ClassificationHead(
@@ -944,9 +910,9 @@ def train_one_run(
 
     criterion = nn.CrossEntropyLoss()
 
-    # Le backbone est toujours dans l'optimizer : les couches fine-tunées
-    # sont simplement inactives (requires_grad=False) tant que l'epoch de
-    # dégel n'est pas atteinte.
+    # The backbone is always in the optimizer: the fine-tuned layers are
+    # simply inactive (requires_grad=False) until the unfreeze epoch is
+    # reached.
     parameters = list(head.parameters()) + list(backbone.trainable_parameters)
 
     optimizer = torch.optim.Adam(
@@ -974,16 +940,17 @@ def train_one_run(
     train_accuracy = []
     val_accuracy = []
 
-    # Seules les prédictions de l'epoch d'arrêt et, à défaut, de la dernière
-    # epoch sont conservées (les autres sont jetées après la validation).
+    # Only the predictions of the stop epoch and, by default, of the last
+    # epoch are kept (the others are discarded after validation).
+    #if stop epoch happens before fine-tuning launch defreezing and waits at least 5 epochs before defreezing
     early_stop_predictions = None
     last_epoch_predictions = None
 
-    # État du fine-tuning à la dernière epoch traitée (voir boucle ci-dessous).
+    # Fine-tuning state at the last processed epoch (see loop below).
     is_finetuned = False
 
     def snapshot_state(module: nn.Module) -> dict:
-        """Copie les poids sur CPU pour figer l'état d'une epoch."""
+        """Copy the weights to CPU to freeze the state of an epoch."""
         return {
             key: value.detach().cpu().clone()
             for key, value in module.state_dict().items()
@@ -995,21 +962,21 @@ def train_one_run(
         # TRAINING
         # ====================================================
 
-        # Dégel des couches fine-tunées à partir de defreeze_epoch
-        # (1-based). `None` => pas de fine-tuning
+        # Unfreeze the fine-tuned layers from defreeze_epoch (1-based).
+        # `None` => no fine-tuning
         if defreeze_epoch is None:
             backbone.set_trainable(False)
         else:
             backbone.set_trainable((epoch + 1) >= defreeze_epoch)
 
-        # Indique si le backbone est réellement fine-tuné à cette epoch
-        # (au moins un paramètre du backbone est entraînable).
+        # Indicates whether the backbone is actually fine-tuned at this epoch
+        # (at least one backbone parameter is trainable).
         is_finetuned = any(
             parameter.requires_grad
             for parameter in backbone.trainable_parameters
         )
 
-        # Backbone figé => les features ne changent pas d'une epoch à l'autre.
+        # Frozen backbone => features do not change from one epoch to another.
         frozen = defreeze_epoch is not None and (epoch + 1) < defreeze_epoch
 
         train_loader = make_train_loader(epoch + 1, frozen)
@@ -1031,8 +998,8 @@ def train_one_run(
             label = label.to(device, non_blocking=True)
 
             if needs_backbone:
-                # Images augmentées à la volée : features calculées sur le
-                # batch courant, rien n'est pré-calculé ni enregistré.
+                # Images augmented on the fly: features computed on the
+                # current batch, nothing is pre-computed or saved.
                 x = backbone(x)
 
             output = head(x)
@@ -1075,9 +1042,9 @@ def train_one_run(
         error = 0.0
         corrects = 0
 
-        # Décide si les prédictions de CETTE epoch doivent être conservées.
-        # Seules l'epoch d'arrêt simulée et la dernière epoch sont gardées :
-        # les rows des autres epochs sont inutiles et coûteux en mémoire.
+        # Decide whether the predictions of THIS epoch should be kept.
+        # Only the simulated stop epoch and the last epoch are kept: rows
+        # from other epochs are useless and memory-expensive.
         is_stop_epoch = False
         if (
             min_acc_improvement is not None
@@ -1092,11 +1059,20 @@ def train_one_run(
                     (current_acc - previous_acc) / previous_acc * 100
                 )
                 is_stop_epoch = improvement < min_acc_improvement
+                if frozen:
+                    defreeze_epoch = epoch + 1
+                    is_stop_epoch = None
+                elif (epoch + 1 - defreeze_epoch)<5:
+                    is_stop_epoch = None
+                elif (epoch + 1 - aug_epoch)<5:
+                    is_stop_epoch = None
+
+
 
         is_last_epoch = epoch == num_epoch - 1
-        # Si aucun early stopping n'a encore été déclenché, on conserve les
-        # prédictions de la dernière epoch : elles serviront d'arrêt si
-        # `min_acc_improvement` est None.
+        # If no early stopping has been triggered yet, keep the predictions
+        # of the last epoch: they will serve as the stop if
+        # `min_acc_improvement` is None.
         keep_predictions = is_stop_epoch or (
             is_last_epoch and stop_epoch is None
         )
@@ -1245,8 +1221,8 @@ def train_one_run(
         if is_last_epoch and stop_epoch is None:
             last_epoch_predictions = val_prediction_rows
 
-        # On fige les poids de l'epoch d'arrêt : ce sont EUX (et non ceux de
-        # la dernière epoch) qui seront sauvegardés.
+        # Freeze the weights of the stop epoch: THEY (and not those of the
+        # last epoch) will be saved.
         if is_stop_epoch:
             early_stop_predictions = val_prediction_rows
             stop_epoch = epoch
@@ -1254,8 +1230,8 @@ def train_one_run(
             stop_head_state = snapshot_state(head)
             stop_backbone_state = snapshot_state(backbone.model)
 
-    # Si aucun arrêt n'a été déclenché (early stopping désactivé ou jamais
-    # atteint), l'arrêt correspond à la dernière epoch.
+    # If no stop was triggered (early stopping disabled or never reached),
+    # the stop corresponds to the last epoch.
     if stop_epoch is None:
         stop_epoch = len(train_accuracy) - 1
         stop_is_finetuned = is_finetuned
@@ -1374,17 +1350,17 @@ def build_run_dataframe(
 
 
 # ============================================================
-# BOUCLE PRINCIPALE SUR LES RUNS
+# MAIN LOOP OVER RUNS
 # ============================================================
 def run_training(args: argparse.Namespace) -> pd.DataFrame:
-    """Entraîne la tête pour tous les runs du fichier de splits.
+    """Train the head for all runs of the splits file.
 
-    Retourne le tableau récapitulatif des runs (une ligne par run).
+    Returns the run summary table (one row per run).
     """
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Les modèles sont sauvegardés directement dans le dossier de résultats.
+    # Models are saved directly in the results folder.
     model_dir = out_dir / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1651,6 +1627,7 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
             lr=args.lr,
             defreeze_epoch=args.defreeze_epoch,
             min_acc_improvement=args.early_stopping,
+            aug_epoch=args.aug_epoch
         )
 
         train_error = result["train_error"]
@@ -1768,8 +1745,8 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
     print(f"Runs summary: {summary_path}")
 
     """# ------------------------------------------------------------
-    # Ne conserver que le modèle dont la val accuracy est la plus
-    # proche de la médiane des val accuracy de tous les runs.
+    # Keep only the model whose val accuracy is closest to the
+    # median val accuracy of all runs.
     # ------------------------------------------------------------
     if run_val_accuracies:
         median_val_accuracy = float(
@@ -1853,7 +1830,7 @@ def build_val_pred_df(rows: list[dict]) -> pd.DataFrame:
 # CONFIGURATION
 # ============================================================
 def load_pipeline_config(path: Path | None) -> dict:
-    """Charge le fichier de configuration du pipeline (YAML)."""
+    """Load the pipeline configuration file (YAML)."""
     if path is None:
         return {}
     with open(path, "r", encoding="utf-8") as file:
@@ -1861,18 +1838,18 @@ def load_pipeline_config(path: Path | None) -> dict:
 
 
 # ============================================================
-# CHEMINS DE LA CONFIGURATION
+# CONFIGURATION PATHS
 # ============================================================
 def format_template(template: str, values: dict) -> str:
-    """Remplace les {placeholders} d'un chemin de la configuration."""
+    """Replace the {placeholders} of a configuration path."""
     return template.format_map(defaultdict(str, values))
 
 
 def build_path_values(config: dict) -> dict:
-    """Valeurs utilisables dans les chemins de la configuration.
+    """Values usable in configuration paths.
 
-    La date est "assainie" (les "/" sont remplacés par des "_") afin de
-    pouvoir servir de nom de fichier.
+    The date is "sanitized" ("/" are replaced by "_") so that it can be
+    used as a file name.
     """
     split = config.get("split", {}) or {}
     return {
@@ -1885,7 +1862,7 @@ def build_path_values(config: dict) -> dict:
 
 
 def resolve_path(home_path: Path, template: str, values: dict) -> Path:
-    """Résout un chemin de la configuration par rapport à `home_path`."""
+    """Resolve a configuration path relative to `home_path`."""
     rendered = format_template(template, values)
     path = Path(rendered)
     if path.is_absolute():
@@ -1894,9 +1871,9 @@ def resolve_path(home_path: Path, template: str, values: dict) -> Path:
 
 
 def resolve_config_paths(config: dict) -> dict:
-    """Résout les chemins `paths.*` de la configuration.
+    """Resolve the `paths.*` entries of the configuration.
 
-    Retourne un dict avec les clés crop_path, crop_file, split_file et
+    Returns a dict with the keys crop_path, crop_file, split_file and
     model_dir.
     """
     paths = config.get("paths", {}) or {}
@@ -1920,8 +1897,8 @@ def resolve_config_paths(config: dict) -> dict:
 
 
 def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
-    """Complète les arguments non fournis par la ligne de commande avec
-    les valeurs du fichier de configuration du pipeline."""
+    """Fill the arguments not provided on the command line with
+    values from the pipeline configuration file."""
     config = load_pipeline_config(
         Path(args.config) if args.config else None
     )
@@ -1977,13 +1954,13 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
     if getattr(args, "transform_params", None) is None:
         args.transform_params = config.get("params", {}) or {}
 
-    # Chemins : la ligne de commande prime, sinon la configuration.
+    # Paths: the command line takes precedence, otherwise the configuration.
     config_paths = resolve_config_paths(config)
     for name in ("crop_path", "crop_file", "split_file", "model_dir"):
         if getattr(args, name, None) is None and name in config_paths:
             setattr(args, name, str(config_paths[name]))
 
-    # Valeurs par défaut de l'architecture si le YAML ne précise rien
+    # Architecture defaults if the YAML does not specify anything
     architecture = ARCHITECTURES.get(args.feature_extractor, {})
     if args.last_layer is None:
         args.last_layer = architecture.get("default_last_layer")

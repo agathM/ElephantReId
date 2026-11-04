@@ -1,19 +1,18 @@
 """
-PIPELINE D'ENTRAÎNEMENT
+TRAINING PIPELINE
 
-Lit un fichier de configuration YAML (par défaut `config/pipeline.yaml`) et :
+Reads a YAML configuration file (default: `config/pipeline.yaml`) and:
 
-1. crée un dossier de résultats versionné (`<results>/v1`, `v2`, ...) ;
-2. y copie TOUS les fichiers `.yaml` : ceux référencés dans la configuration,
-   ceux présents dans le dossier de la configuration, et le `pipeline.yaml`
-   lui-même ;
-3. exécute le script d'entraînement modulaire `scripts/train_classifier.py`
-   (extraction des features, fine-tuning éventuel, tête ClassificationHead,
-   augmentation RandomAffine + ColorJitter, un run par split) ;
-4. exécute `cosine_similarity.py` sur le backbone du modèle médian pour
-   produire `val_pred.csv` (voisins cosinus + vote majoritaire) ;
-5. complète le tableau récapitulatif des expériences (`all_experiments.csv`)
-   avec une ligne par run (train_acc, val_acc, ...).
+1. creates a versioned results folder (`<results>/v1`, `v2`, ...);
+2. copies ALL `.yaml` files into it: those referenced in the configuration,
+   those present in the configuration folder, and `pipeline.yaml` itself;
+3. runs the modular training script `scripts/train_classifier.py`
+   (feature extraction, optional fine-tuning, ClassificationHead head,
+   RandomAffine + ColorJitter augmentation, one run per split);
+4. runs `cosine_similarity.py` on the backbone of the median model to
+   produce `val_pred.csv` (cosine neighbours + majority vote);
+5. fills in the experiment summary table (`all_experiments.csv`) with one
+   row per run (train_acc, val_acc, ...).
 
 USAGE
 -----
@@ -30,13 +29,16 @@ import pandas as pd
 import yaml
 import train_classifier, detect_and_track, cosine_similarity
 import os
+import numpy as np
 import pdb
 
-from IPython.core.magics import script
-
 #DETECTION CHOICES
-DETECT_CHOICES = ['ear_seg','body_detect'] #'ear_seg','body_detect','ear_detect', 'head_detect'
+DETECT_CHOICES = ['ear_seg','body_detect','ear_detect','head_detect'] #'ear_seg','body_detect','ear_detect', 'head_detect'
+RERUN_SOME_DETECT = False #to activate only if new frame database
 MODE = ["Day","Night"]
+# If False, no training is launched: cosine similarity is evaluated directly
+# on the pretrained backbone.
+FINETUNE = True
 
 #DEFAULT PARAMETERS FOR CHOICES
 DETECT_PARAMS = {}
@@ -73,22 +75,36 @@ EXPERIMENT_COLUMNS = [
 
 EXPERIMENTS_CSV_NAME = "all_experiments.csv"
 
-
+CROPS_DTYPES = {
+    "video": str,
+    "image": str,
+    "track_id": int,
+    "detection": str,
+    "area": int,
+    "ratio": float,
+    "indiv": str,
+    "frame": int,
+    "conf": float,
+    "x1": int,
+    "x2": int,
+    "y1": int,
+    "y2": int,
+}
 
 def load_config(config_dir: Path) -> dict:
-    """Charge le fichier de configuration du pipeline."""
+    """Load the pipeline configuration file."""
     config_path = config_dir / "pipeline.yaml"
     with open(config_path, "r", encoding="utf-8") as file:
         return yaml.safe_load(file) or {}
 
 
 # ============================================================
-# DOSSIER DE RÉSULTATS
+# RESULTS FOLDER
 # ============================================================
 def next_results_dir(results_root: Path) -> tuple[str, Path]:
-    """Détermine le prochain dossier versionné (`v1`, `v2`, ...).
+    """Determine the next versioned folder (`v1`, `v2`, ...).
 
-    Retourne (version, dossier de résultats).
+    Returns (version, results folder).
     """
 
     def contains_any_file(folder):
@@ -110,85 +126,6 @@ def next_results_dir(results_root: Path) -> tuple[str, Path]:
     return version, results_root / version
 
 
-# ============================================================
-# COPIE DES FICHIERS DE CONFIGURATION (.yaml)
-# ============================================================
-def collect_yaml_references(config: dict) -> list[str]:
-    """Renvoie tous les chemins `.yaml` référencés dans la configuration."""
-    references: list[str] = []
-
-    def walk(node) -> None:
-        if isinstance(node, dict):
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, (list, tuple)):
-            for value in node:
-                walk(value)
-        elif isinstance(node, str):
-            if node.strip().lower().endswith((".yaml", ".yml")):
-                references.append(node.strip())
-
-    walk(config)
-    return references
-
-
-def _resolve_yaml_file(
-    reference: str,
-    config_dir: Path
-) -> Path | None:
-    """Cherche un fichier .yaml référencé par la configuration."""
-
-    search_paths = [p for p in config_dir.glob('*') if p.is_dir()
-    ]
-    for path in search_paths:
-        path = path / reference
-        if path.exists():
-            return path
-    return None
-
-
-def collect_config_files(
-    config_dir: Path,
-    config: dict,
-) -> list[Path]:
-    """Liste les `.yaml` de l'expérience, dans l'ordre de copie.
-
-    Sont retenus :
-        - le `pipeline.yaml` lui-même ;
-        - tous les `.yaml` référencés dans la configuration ;
-    """
-    sources = [config_dir / "pipeline.yaml"]
-
-    # 2) les .yaml référencés dans la configuration
-    for reference in collect_yaml_references(config):
-        source = _resolve_yaml_file(reference, config_dir)
-        if source is not None:
-            sources.append(source)
-    return sources
-
-
-def copy_config_files(
-    config_dir: Path,
-    config: dict,
-    results_dir: Path,
-) -> list[Path]:
-    """Copie dans `results_dir` tous les `.yaml` de l'expérience.
-
-    Retourne la liste des fichiers copiés.
-    """
-
-    copied: list[Path] = []
-    used_names: set[str] = set()
-
-    for source in collect_config_files(config_dir, config):
-        name = source.name
-        destination = results_dir / "input_metadata" / name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        copied.append(destination)
-    return copied
-
-import numpy as np
 def get_existing_version(df: pd.DataFrame, row: dict) -> str | None:
     """Return the version if a matching row exists, otherwise None."""
 
@@ -225,10 +162,10 @@ def get_existing_version(df: pd.DataFrame, row: dict) -> str | None:
 
 
 # ============================================================
-# TABLEAU RÉCAPITULATIF DES EXPÉRIENCES
+# EXPERIMENT SUMMARY TABLE
 # ============================================================
 def describe_augmentation(config: dict) -> str:
-    """Décrit l'augmentation de données de l'expérience (colonne CSV)."""
+    """Describe the experiment data augmentation (CSV column)."""
     augmentation = config.get("data_augmentation", {}) or {}
     params = augmentation.get("torch_transformation")
     training = config.get("training_parameters", {}) or {}
@@ -270,8 +207,8 @@ def update_experiment_df(
     experiments_path: Path,
     rows: list[dict],
 ) -> pd.DataFrame:
-    """Ajoute les lignes d'une expérience au tableau récapitulatif.
-    CHANGER POUR EMPECHER UN AJOUT SI MEME LIGNE ?
+    """Add an experiment's rows to the summary table.
+    CHANGE TO PREVENT ADDING A DUPLICATE ROW?
     """
     if experiments_path.exists():
         df = pd.read_csv(experiments_path)
@@ -299,14 +236,14 @@ def update_experiment_df(
 
 
 # ============================================================
-# ENTRAÎNEMENT
+# TRAINING
 # ============================================================
 def build_training_args(
     config: dict,
     config_path: Path,
     results_dir: Path,
 ) -> argparse.Namespace:
-    """Construit les arguments du script d'entraînement à partir du YAML."""
+    """Build the training script arguments from the YAML configuration."""
     paths = config.get("paths", {}) or {}
     values = train_classifier.build_path_values(config)
     home_path = Path(config.get("home_path", "..")).expanduser()
@@ -373,6 +310,56 @@ def check_inputs(args: argparse.Namespace) -> None:
         )
 
 
+def build_untrained_summary(args: argparse.Namespace) -> pd.DataFrame:
+    """Build a per-run summary without any training metric.
+
+    Used when ``FINETUNE`` is false: one row per run with split sizes and
+    detections, but columns coming from training (accuracy, loss, stop
+    epoch, duration, ...) are left empty.
+    """
+    splits_df = getattr(args, "splits_df", None)
+    images_df = getattr(args, "images_df", None)
+
+    if splits_df is None or images_df is None:
+        raise ValueError(
+            "'splits_df' et 'images_df' sont requis pour construire le "
+            "résumé sans entraînement."
+        )
+
+    runs = sorted(splits_df["run"].dropna().unique().tolist())
+    if getattr(args, "limit_runs", None) is not None:
+        runs = runs[: args.limit_runs]
+
+    rows = []
+    for run in runs:
+        df = train_classifier.build_run_dataframe(images_df, splits_df, run)
+        train_df = df[df["split"] == "train"]
+        val_df = df[df["split"] == "val"]
+
+        rows.append(
+            {
+                "run": run,
+                "detections": ", ".join(
+                    sorted(df["detection"].unique().tolist())
+                ),
+                "num_classes": int(df["label"].nunique()),
+                "num_train": len(train_df),
+                "num_val": len(val_df),
+                # Training metrics: empty (no training).
+                "train_acc": float("nan"),
+                "val_acc": float("nan"),
+                "best_val_acc": float("nan"),
+                "best_epoch": float("nan"),
+                "train_loss": float("nan"),
+                "val_loss": float("nan"),
+                "early_stop_epoch": float("nan"),
+                "duration_s": float("nan"),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -415,17 +402,13 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Dossier résultats: {results_dir}")
 
     # ------------------------------------------------------------
-    # 1) COPIE DES FICHIERS .yaml
+    # 1) COPYING .yaml FILES
     # ------------------------------------------------------------
-    print("\nCopie des fichiers de configuration :")
-    if arg.dry_run:
-        for source in collect_config_files(config_dir, config):
-            print(f"  - {source.name}")
-        print("\n[dry-run] aucun dossier créé, entraînement non lancé.")
-        return
+    print("\nCopie du fichier de configuration :")
 
     try:
-        results_dir.mkdir(parents=True, exist_ok=True)
+        (results_dir / "input_metadata").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(config_dir / "pipeline.yaml", results_dir / "input_metadata" / "pipeline.yaml")
     except OSError as error:
         raise OSError(
             f"Impossible de créer le dossier de résultats '{results_dir}'.\n"
@@ -433,9 +416,6 @@ def main(argv: list[str] | None = None) -> None:
             f"en écriture.\nDétail : {error}"
         ) from error
 
-    copied = copy_config_files(config_dir, config, results_dir)
-    for path in copied:
-        print(f"  - {path.name}")
     crops_dir = Path(config["home_dir"]) / config["crops_dir"]
     video_database_df = pd.read_csv(Path(config["home_dir"]) / config["video_database"])
     video_database_df = video_database_df[video_database_df["mode"].isin(MODE)]
@@ -446,6 +426,7 @@ def main(argv: list[str] | None = None) -> None:
     detection["split_dir"] = Path(config["home_dir"]) / config["split_dir"]
     detection['frame_database'] = frame_database
     detection['video_database'] = video_database_df
+    detection['rerun'] = RERUN_SOME_DETECT
     print("Detections")
     import detect_and_track as detect
     for model in DETECT_PARAMS:
@@ -492,7 +473,7 @@ def main(argv: list[str] | None = None) -> None:
                 min_ratio = filter["min_ratio"]
                 max_ratio = filter["max_ratio"]
                 crops_file = crops_dir / f"{model.split('.')[0]}.csv"
-                df = pd.read_csv(crops_file)
+                df = pd.read_csv(crops_file,dtype=CROPS_DTYPES)
                 df = df[~df.indiv.isna()]
                 df = df[(df.conf >= conf) & (df.area >= min_area)]
                 if min_ratio:
@@ -507,7 +488,7 @@ def main(argv: list[str] | None = None) -> None:
                                 f"detection_filters.{script_name}"
                             )
                             df = filter_script.main(df, crops_dir, model)
-                df['label'] = df["indiv"] + "_" + label  # vrai séparation gauche droite pour oreille?
+                df['label'] = df["indiv"] + "_" + label  # true left/right separation for ears?
                 selected_dfs.append(df)
         selected_df = pd.concat(selected_dfs)
         #GENERATE SPLIT OVER ALL DETECTIONS
@@ -547,11 +528,22 @@ def main(argv: list[str] | None = None) -> None:
 
     check_inputs(args)
 
-    summary_df = train_classifier.run_training(args)
+    if FINETUNE:
+        summary_df = train_classifier.run_training(args)
+    else:
+        print(
+            "\nFINETUNE = False : aucun entraînement lancé, "
+            "similarité cosinus sur le backbone pré-entraîné."
+        )
+        summary_df = build_untrained_summary(args)
+
     if summary_df.empty:
         return
 
-    cosine_df = cosine_similarity.run_similarity(args)
+    cosine_df = cosine_similarity.run_similarity(
+        args,
+        pretrained_only=not FINETUNE,
+    )
     if isinstance(cosine_df, pd.DataFrame) and not cosine_df.empty:
         if "run" in cosine_df.columns and "cosine_acc" in cosine_df.columns:
             summary_df = summary_df.merge(
@@ -560,20 +552,39 @@ def main(argv: list[str] | None = None) -> None:
             cosine_path = Path(args.out_dir) / "runs_summary.csv"
             summary_df.to_csv(cosine_path, index=False)
             print(f"Runs summary updated with cosine_acc: {cosine_path}")
+    elif not FINETUNE:
+        # Without training, no summary has been written yet: create it even
+        # if cosine similarity produced nothing.
+        cosine_path = Path(args.out_dir) / "runs_summary.csv"
+        summary_df.to_csv(cosine_path, index=False)
+        print(f"Runs summary: {cosine_path}")
 
     summary_df['train_weights'] = (
         summary_df.num_train / summary_df.num_train.sum()
     )
     summary_df['val_weights'] = summary_df.num_val / summary_df.num_val.sum()
-    train_std = summary_df.train_acc.std(axis=0)
-    val_std = summary_df.val_acc.std(axis=0)
-    cos_val_std = summary_df.cosine_acc.std(axis=0)
-    mean_train_acc_over_runs = (
-        (summary_df['train_acc'] * summary_df['train_weights']).mean()
+    cos_val_std = (
+        summary_df.cosine_acc.std(axis=0)
+        if "cosine_acc" in summary_df.columns
+        else None
     )
-    mean_val_acc_over_runs = (
-        (summary_df['val_acc'] * summary_df['val_weights']).mean()
-    )
+
+    if FINETUNE:
+        train_std = summary_df.train_acc.std(axis=0)
+        val_std = summary_df.val_acc.std(axis=0)
+        mean_train_acc_over_runs = (
+            (summary_df['train_acc'] * summary_df['train_weights']).mean()
+        )
+        mean_val_acc_over_runs = (
+            (summary_df['val_acc'] * summary_df['val_weights']).mean()
+        )
+    else:
+        # No training: experiment columns left empty.
+        train_std = None
+        val_std = None
+        mean_train_acc_over_runs = None
+        mean_val_acc_over_runs = None
+
     mean_cosine_acc_over_run = None
     if "cosine_acc" in summary_df.columns and summary_df["cosine_acc"].notna().any():
         mean_cosine_acc_over_run = float(
@@ -581,7 +592,7 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     # ------------------------------------------------------------
-    # 3) TABLEAU RÉCAPITULATIF DES EXPÉRIENCES
+    # 3) EXPERIMENT SUMMARY TABLE
     # ------------------------------------------------------------
     row ={
             "version": version,
