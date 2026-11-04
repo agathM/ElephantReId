@@ -131,6 +131,8 @@ def get_partially_treated_video_to_treat(partially_treated_videos):
                 detections.loc[idx, "indiv"] = detection_id
             else:
                 videos_to_treat.add(row["video"])
+    detections = detections[~detections.video.isin(videos_to_treat)] #avoid duplicates
+    detections.drop_duplicates(inplace=True) #safeguard
     detections.to_csv(crops_file_path,index=False)
     return videos_to_treat
 

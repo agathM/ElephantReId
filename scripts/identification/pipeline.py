@@ -34,10 +34,7 @@ import pdb
 
 #DETECTION CHOICES
 DETECT_CHOICES = ['ear_seg','body_detect','ear_detect','head_detect'] #'ear_seg','body_detect','ear_detect', 'head_detect'
-RERUN_SOME_DETECT = False #to activate only if new frame database
 MODE = ["Day","Night"]
-# If False, no training is launched: cosine similarity is evaluated directly
-# on the pretrained backbone.
 FINETUNE = True
 
 #DEFAULT PARAMETERS FOR CHOICES
@@ -435,7 +432,7 @@ def main(argv: list[str] | None = None) -> None:
         detection['labels_to_keep'] = DETECT_PARAMS[model]["labels_to_keep"]
         print(f"Model : {model}")
         print(f"Labels : {detection['labels_to_keep']}")
-        #detect.main(detection)
+        detect.main(detection)
 
     # DETECTIONS FILTERING AND SPLIT
     # FIRST CHECK THAT NO SPLIT WITH SAME FILTERING AND SPLIT PARAMETERS WAS DONE
@@ -519,31 +516,21 @@ def main(argv: list[str] | None = None) -> None:
     # ------------------------------------------------------------
     # 2) TRAINING
     # ------------------------------------------------------------
-    args = build_training_args(config, config_dir, results_dir)
-
-    # The training script consumes the split/image DataFrames directly.
-    args.crop_path = str(crops_dir)
-    args.splits_df = splits_df
-    args.images_df = images_df
-
-    check_inputs(args)
-
     if FINETUNE:
+        args = build_training_args(config, config_dir, results_dir)
+    
+        # The training script consumes the split/image DataFrames directly.
+        args.crop_path = str(crops_dir)
+        args.splits_df = splits_df
+        args.images_df = images_df
+    
+        check_inputs(args)
+    
         summary_df = train_classifier.run_training(args)
-    else:
-        print(
-            "\nFINETUNE = False : aucun entraînement lancé, "
-            "similarité cosinus sur le backbone pré-entraîné."
-        )
-        summary_df = build_untrained_summary(args)
-
-    if summary_df.empty:
-        return
-
-    cosine_df = cosine_similarity.run_similarity(
-        args,
-        pretrained_only=not FINETUNE,
-    )
+        if summary_df.empty:
+            return
+            
+    cosine_df = cosine_similarity.run_similarity(args)
     if isinstance(cosine_df, pd.DataFrame) and not cosine_df.empty:
         if "run" in cosine_df.columns and "cosine_acc" in cosine_df.columns:
             summary_df = summary_df.merge(
