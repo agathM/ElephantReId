@@ -37,9 +37,10 @@ DETECT_CHOICES = ['ear_seg','body_detect','ear_detect','head_detect'] #'ear_seg'
 MODE = ["Day","Night"]
 FINETUNE = False
 RERUN_SOME_DETECT = False
-TEST = True
+TEST = False
 
 #DEFAULT PARAMETERS FOR CHOICES
+REPO_ROOT = Path.cwd()
 DETECT_PARAMS = {}
 for choice in DETECT_CHOICES:
     if choice in ['ear_detect','head_detect']:
@@ -244,7 +245,6 @@ def build_training_args(
     config_path: Path,
     results_dir: Path,
 ) -> argparse.Namespace:
-    """Build the training script arguments from the YAML configuration."""
     paths = config.get("paths", {}) or {}
     values = train_classifier.build_path_values(config)
     home_path = Path(config.get("home_path", "..")).expanduser()
@@ -418,7 +418,7 @@ def main(argv: list[str] | None = None) -> None:
         ) from error
 
     crops_dir = Path(config["home_dir"]) / config["crops_dir"]
-    video_database_df = pd.read_csv(Path(config["home_dir"]) / config["video_database"])
+    video_database_df = pd.read_csv(home_dir / config["video_database"]) #REPO_ROOT = Path.cwd() / "database"
     video_database_df = video_database_df[video_database_df["mode"].isin(MODE)]
     # DETECTIONS
     detection = config["detection"]

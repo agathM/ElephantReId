@@ -33,6 +33,7 @@ VIDEO_EXTENSIONS = {
 
 BORDER = 1
 
+REPO_ROOT = Path.cwd()
 
 CSV_COLUMNS = [
     "image",
@@ -983,7 +984,7 @@ def main(metadata:dict):
         save_videos_with_detections, tracked_videos_dir, labels,split_dir, rerun
     home_dir = Path(metadata['home_dir'])
     split_dir = Path(metadata['split_dir'])
-    frame_database = home_dir / metadata['frame_database']
+    frame_database = home_dir / metadata['frame_database'] # REPO_ROOT / "database"
     frame_database_df = pd.read_csv(frame_database)
     frame_database_df.dropna(subset=["indiv"],inplace=True)
     model_name = metadata['model_name']
@@ -1011,7 +1012,7 @@ def main(metadata:dict):
     single_indiv_videos_df = metadata['video_database']
     single_indiv_videos_df = single_indiv_videos_df[single_indiv_videos_df.several_indivs==False].filter(['indiv','video'])
     single_indiv_videos = {row['video']:row['indiv'] for _,row in single_indiv_videos_df.iterrows()}
-    model_path = home_dir / metadata['model_dir'] / (model_name + '.pt')
+    model_path = REPO_ROOT / "models" / (model_name + '.pt')
     if  not os.path.exists(model_path):
         from PytorchWildlife.models import detection as pw_detection
         import supervision as sv
@@ -1053,7 +1054,7 @@ def main(metadata:dict):
     # Load camera/time maps
     video_to_camera, video_to_time = {}, {}
     for name, dst in [("video_to_camera.pkl", video_to_camera), ("video_to_time.pkl", video_to_time)]:
-        pkl = Path("/home/agath/Documents/MNHN/code") / name
+        pkl = home_dir / name
         if pkl.exists():
             try:
                 with open(pkl, "rb") as f:
