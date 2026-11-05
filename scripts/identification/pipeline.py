@@ -35,7 +35,8 @@ import pdb
 #DETECTION CHOICES
 DETECT_CHOICES = ['ear_seg','body_detect','ear_detect','head_detect'] #'ear_seg','body_detect','ear_detect', 'head_detect'
 MODE = ["Day","Night"]
-FINETUNE = True
+FINETUNE = False
+RERUN_SOME_DETECT = False
 
 #DEFAULT PARAMETERS FOR CHOICES
 DETECT_PARAMS = {}
@@ -210,6 +211,7 @@ def update_experiment_df(
     if experiments_path.exists():
         df = pd.read_csv(experiments_path)
     else:
+        print(f"First experiments saved in {experiments_path.name}")
         df = pd.DataFrame(columns=EXPERIMENT_COLUMNS)
 
     for column in EXPERIMENT_COLUMNS:
@@ -220,8 +222,9 @@ def update_experiment_df(
 
     if rows:
         new_df = pd.DataFrame(rows)
-        df = pd.concat([df, new_df], ignore_index=True)
-
+        valid_columns = new_df.columns[~new_df.isna().all()]
+        df = pd.concat([df, new_df[valid_columns]], ignore_index=True)
+        
     df = df.sort_values(
         by=["version"],
         na_position="last",
@@ -432,7 +435,7 @@ def main(argv: list[str] | None = None) -> None:
         detection['labels_to_keep'] = DETECT_PARAMS[model]["labels_to_keep"]
         print(f"Model : {model}")
         print(f"Labels : {detection['labels_to_keep']}")
-        detect.main(detection)
+        #detect.main(detection)
 
     # DETECTIONS FILTERING AND SPLIT
     # FIRST CHECK THAT NO SPLIT WITH SAME FILTERING AND SPLIT PARAMETERS WAS DONE
@@ -487,7 +490,9 @@ def main(argv: list[str] | None = None) -> None:
                             df = filter_script.main(df, crops_dir, model)
                 df['label'] = df["indiv"] + "_" + label  # true left/right separation for ears?
                 selected_dfs.append(df)
+        print("selected_df",flush=True)
         selected_df = pd.concat(selected_dfs)
+        print("selected_df end concat",flush=True)
         #GENERATE SPLIT OVER ALL DETECTIONS
         print("GENERATE NEW SPLIT")
         split_config["video_database"] = video_database_df
@@ -516,19 +521,22 @@ def main(argv: list[str] | None = None) -> None:
     # ------------------------------------------------------------
     # 2) TRAINING
     # ------------------------------------------------------------
-    if FINETUNE:
-        args = build_training_args(config, config_dir, results_dir)
+    args = build_training_args(config, config_dir, results_dir)
+
+    # The training script consumes the split/image DataFrames directly.
+    args.crop_path = str(crops_dir)
+    args.splits_df = splits_df
+    args.images_df = images_df
     
-        # The training script consumes the split/image DataFrames directly.
-        args.crop_path = str(crops_dir)
-        args.splits_df = splits_df
-        args.images_df = images_df
-    
-        check_inputs(args)
-    
+    check_inputs(args)
+    if FINETUNE:    
         summary_df = train_classifier.run_training(args)
         if summary_df.empty:
             return
+        else:
+            summary_df = build_untrained_summary(args)
+    else:
+        summary_df = build_untrained_summary(args)
             
     cosine_df = cosine_similarity.run_similarity(args)
     if isinstance(cosine_df, pd.DataFrame) and not cosine_df.empty:
@@ -539,12 +547,6 @@ def main(argv: list[str] | None = None) -> None:
             cosine_path = Path(args.out_dir) / "runs_summary.csv"
             summary_df.to_csv(cosine_path, index=False)
             print(f"Runs summary updated with cosine_acc: {cosine_path}")
-    elif not FINETUNE:
-        # Without training, no summary has been written yet: create it even
-        # if cosine similarity produced nothing.
-        cosine_path = Path(args.out_dir) / "runs_summary.csv"
-        summary_df.to_csv(cosine_path, index=False)
-        print(f"Runs summary: {cosine_path}")
 
     summary_df['train_weights'] = (
         summary_df.num_train / summary_df.num_train.sum()
@@ -587,9 +589,10 @@ def main(argv: list[str] | None = None) -> None:
             "detections": DETECT_CHOICES,
             "mode": MODE,
             "split_event": config['split']['event'],
-            "architecture": args.feature_extractor,
             "data_augmentation": describe_augmentation(config),
+            "architecture": args.feature_extractor,
             "last_fozen_layer": config["feature_extractor"]["last_frozen_layer"],
+            "last_layer": config["feature_extractor"]["last_layer"],
             "mean_train_acc_over_runs": mean_train_acc_over_runs,
             "train_acc_std": train_std,
             "mean_val_acc_over_run": mean_val_acc_over_runs,

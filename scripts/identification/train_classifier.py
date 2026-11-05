@@ -136,7 +136,7 @@ ARCHITECTURES: dict[str, dict] = {
         "mean": IMAGENET_MEAN,
         "std": IMAGENET_STD,
         "default_last_layer": "norm",
-        "default_last_frozen_layer": "norm",
+        "default_last_frozen_layer": "layers.3",
         "default_batch_norm_only": False
     },
     "MiewID": {
@@ -489,6 +489,7 @@ def build_backbone(name: str, pretrained: bool = True) -> Backbone:
 
     elif name == "MiewID":
         from transformers import AutoModel
+
         model = AutoModel.from_pretrained(
             "conservationxlabs/miewid-msv3",
             trust_remote_code=True,
@@ -662,12 +663,12 @@ class FeatureModel(nn.Module):
         """
         keys = self._module_order_keys()
         key_last = self._order_key(self.last_layer)
-
         if self.last_frozen_layer is None:
             key_frozen = (-1,)
         else:
             key_frozen = self._order_key(self.last_frozen_layer)
             if key_last <= key_frozen:
+                print(key_last, key_frozen)
                 raise ValueError(
                     f"last_layer ('{self.last_layer}') doit être situé APRÈS "
                     f"last_frozen_layer ('{self.last_frozen_layer}')."

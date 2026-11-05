@@ -83,9 +83,9 @@ data_augmentation:
 #                fine-tuned from `defreeze_epoch`.
 #                "null" => no fine-tuning.
 feature_extractor:
-    name: "ResNet50"
+    name: "MegaDescriptor"
     last_layer: null              # output from last_layer
-    last_frozen_layer: "layer3"
+    last_frozen_layer: null
 
 training_parameters:
     batch_size: 64
