@@ -994,6 +994,7 @@ def main(metadata:dict):
     save_videos_with_detections = metadata["save_videos_with_detections"]
     labels_to_keep = metadata["labels_to_keep"]
     rerun = metadata["rerun"]
+    test = metadata["test"]
     tracked_videos_dir = None
     if save_videos_with_detections:
         tracked_videos_rel = metadata['tracked_videos_dir']
@@ -1118,8 +1119,8 @@ def main(metadata:dict):
 
     n_done = 0
     n_failed = []
-
-    for p, reset_tracker in videos_with_reset[:1]:
+    
+    for p, reset_tracker in videos_with_reset:
         rows = []
         detections_by_frame = {}
         args = {"model": model,
@@ -1177,6 +1178,8 @@ def main(metadata:dict):
             f"[{n_done}/{len(videos_to_treat)}] {p} : "
             f"{len(rows)} detections"
         )
+        if test and n_done>2:
+            break
 
     print(
         f"\nTermine : {n_done} videos ecrits dans {crops_file_path}"

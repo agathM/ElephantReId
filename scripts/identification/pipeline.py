@@ -37,6 +37,7 @@ DETECT_CHOICES = ['ear_seg','body_detect','ear_detect','head_detect'] #'ear_seg'
 MODE = ["Day","Night"]
 FINETUNE = False
 RERUN_SOME_DETECT = False
+TEST = True
 
 #DEFAULT PARAMETERS FOR CHOICES
 DETECT_PARAMS = {}
@@ -427,6 +428,7 @@ def main(argv: list[str] | None = None) -> None:
     detection['frame_database'] = frame_database
     detection['video_database'] = video_database_df
     detection['rerun'] = RERUN_SOME_DETECT
+    detection['test'] = TEST
     print("Detections")
     import detect_and_track as detect
     for model in DETECT_PARAMS:
@@ -435,7 +437,7 @@ def main(argv: list[str] | None = None) -> None:
         detection['labels_to_keep'] = DETECT_PARAMS[model]["labels_to_keep"]
         print(f"Model : {model}")
         print(f"Labels : {detection['labels_to_keep']}")
-        #detect.main(detection)
+        detect.main(detection)
 
     # DETECTIONS FILTERING AND SPLIT
     # FIRST CHECK THAT NO SPLIT WITH SAME FILTERING AND SPLIT PARAMETERS WAS DONE
@@ -507,12 +509,14 @@ def main(argv: list[str] | None = None) -> None:
         subset=['event', 'label'],
         keep='last'
     ).reset_index(drop=True)
-    images_df = images_df[images_df.event.isin([i for i in range(10)])]
-    splits_df = splits_df[splits_df.event.isin([i for i in range(10)])]
-    label_to_split = images_df.merge(splits_df, how='inner', on='event').groupby('label').agg(set).to_dict()
-    for label in label_to_split:
-        if label_to_split[label]==set(['val']):
-            images_df = images_df[~images_df.label.isin([label])]
+    if TEST:
+        images_df = images_df[images_df.event.isin([i for i in range(10)])]
+        splits_df = splits_df[splits_df.event.isin([i for i in range(10)])]
+        label_to_split = images_df.merge(splits_df, how='inner', on='event').groupby('label').agg(set).to_dict()
+        for label in label_to_split:
+            if label_to_split[label]==set(['val']):
+                images_df = images_df[~images_df.label.isin([label])]
+                
 
     splits_df.to_csv(results_dir / "input_metadata" / f"{split_version}_splits.csv")
     images_df.to_csv(results_dir / "input_metadata" / f"{split_version}_selected_images.csv")
