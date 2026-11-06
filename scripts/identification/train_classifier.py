@@ -75,36 +75,6 @@ from network import ClassificationHead  # noqa: E402
 
 
 # ============================================================
-# MAPPING TABLE  last_layer / last_frozen_layer
-# ------------------------------------------------------------
-# This is where the mapping is filled between the LOGICAL NAME chosen on
-# the command line (--last-layer / --last-frozen-layer) and the ACTUAL
-# module of the model.
-# ============================================================
-LAYER_MAPPING: dict[str, dict[str, dict[str, str]]] = {
-    "ResNet152": {
-        "layer1": {"module": "layer1"},
-        "layer2": {"module": "layer2"},
-        "layer3": {"module": "layer3"}, # from layer3.0.relu to layer3.35.relu
-        "layer4": {"module": "layer4"}, # from layer4.0.relu to layer4.2.relu -> add avgpool
-        "avgpool": {"module": "avgpool"},
-    },
-    "ResNet50": {   # 16 blocks, each block has 3 convolution layers followed by batch normalization then relu at the end
-        "layer1": {"module": "layer1"},
-        "layer2": {"module": "layer2"},
-        "layer3": {"module": "layer3"},  # from layer3.0.relu to layer3.5.relu
-        "layer4": {"module": "layer4"},  # from layer4.0.relu to layer4.2.relu -> add avgpool
-        "avgpool": {"module": "avgpool"},
-    },
-    "MegaDescriptor": {
-        "norm": {"module": "norm"},
-    },
-    "MiewID": {                     # 0 	3 	6 	15 	30 	60 	90 	120 	150 	180 unfreezing layers
-        "bn": {"module": "bn"},     # backbone.blocks.5.9, backbone.blocks.4.9, backbone.blocks.3.7, backbone.blocks.3.0 -> simple test does not look at activations within blocks
-    },
-}
-
-# ============================================================
 # FEATURE EXTRACTOR REGISTRY
 # ------------------------------------------------------------
 # input_size / mean / std: preprocessing expected by each model.
@@ -1908,11 +1878,12 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
     training = config.get("training_parameters", {}) or {}
     augmentation = config.get("data_augmentation", {}) or {}
     transformation = augmentation.get("torch_transformation")
+    
     extractor_config = config.get("feature_extractor", {}) or {}
     extractor_params = config.get("feature_extractor_params", {}) or {}
 
-    # `feature_extractor` is a nested block in pipeline.yaml. Keep support
-    # for a plain extractor name for backward compatibility.
+    # `feature_extractor` is a nested block in pipeline.yaml
+    # or chosen (overrun) in pipeline.py if default finetuning parameters are choosen
     if isinstance(extractor_config, dict):
         extractor_name = extractor_config.get("name")
         extractor_params = {**extractor_config, **extractor_params}
@@ -1920,11 +1891,27 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
         extractor_name = extractor_config
 
     if args.feature_extractor is None:
-        args.feature_extractor = extractor_name or "ResNet152"
-    if args.last_layer is None:
-        args.last_layer = extractor_params.get("last_layer")
-    if args.last_frozen_layer is None:
-        args.last_frozen_layer = extractor_params.get("last_frozen_layer")
+        args.feature_extractor = extractor_name
+        if args.last_layer is None:
+            args.last_layer = extractor_params.get("last_layer")
+        if args.last_frozen_layer is None:
+            args.last_frozen_layer = extractor_params.get("last_frozen_layer")
+    else:
+        # Architecture defaults if the YAML does not specify anything
+        architecture = ARCHITECTURES.get(args.feature_extractor, {})
+        print("Default last and frozen layers choosen, if you want to choose them modidy pipeline.yaml \
+        and put architecture to None in pipeline.py")
+        if args.last_layer is None:
+            args.last_layer = architecture.get("default_last_layer")
+        if args.last_frozen_layer is None:
+            args.last_frozen_layer = architecture.get(
+                "default_last_frozen_layer"
+            )
+        if args.feature_extractor not in ARCHITECTURES:
+            raise ValueError(
+                f"Extracteur inconnu : {args.feature_extractor} "
+                f"(choix : {', '.join(FEATURE_EXTRACTORS)})"
+            )
     if args.batch_size is None:
         args.batch_size = training.get("batch_size", 64)
     if args.num_epoch is None:
@@ -1945,6 +1932,8 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
         args.pretrained = training.get("pretrained", True)
     if args.device is None:
         args.device = training.get("device")
+    if args.batch_norm_only is None:
+        args.batch_norm_only = training.get("batch_norm_only")
 
     if getattr(args, "augmentation_params", None) is None:
         args.augmentation_params = transformation
@@ -1961,28 +1950,6 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
         if getattr(args, name, None) is None and name in config_paths:
             setattr(args, name, str(config_paths[name]))
 
-    # Architecture defaults if the YAML does not specify anything
-    architecture = ARCHITECTURES.get(args.feature_extractor, {})
-    if args.last_layer is None:
-        args.last_layer = architecture.get("default_last_layer")
-    if args.last_frozen_layer is None:
-        args.last_frozen_layer = architecture.get(
-            "default_last_frozen_layer"
-        )
-    if getattr(args, "batch_norm_only", None) is None:
-        args.batch_norm_only = architecture.get(
-            "default_batch_norm_only", False
-        )
-
-    if isinstance(args.last_frozen_layer, str):
-        if args.last_frozen_layer.lower() in ("none", "null", ""):
-            args.last_frozen_layer = None
-
-    if args.feature_extractor not in ARCHITECTURES:
-        raise ValueError(
-            f"Extracteur inconnu : {args.feature_extractor} "
-            f"(choix : {', '.join(FEATURE_EXTRACTORS)})"
-        )
 
     return args
 

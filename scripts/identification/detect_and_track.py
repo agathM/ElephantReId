@@ -175,7 +175,7 @@ def append_rows(rows):
     if os.path.exists(crops_file_path):
         df_all = pd.read_csv(crops_file_path)
         df = pd.concat([df, df_all])
-    df.to_csv(index=False)
+    df.to_csv(crops_file_path,index=False)
 
 
 def tracked_video_exists(tracked_videos_dir, video_path):
@@ -883,7 +883,7 @@ def process_video_megadetector(
                                 x2 = int(round(bbox[2]))
                                 y2 = int(round(bbox[3]))
 
-                                label = "body"
+                                label = "body_detect"
 
                                 last_detections.append(
                                     {
@@ -1013,6 +1013,7 @@ def main(metadata:dict):
     single_indiv_videos_df = single_indiv_videos_df[single_indiv_videos_df.several_indivs==False].filter(['indiv','video'])
     single_indiv_videos = {row['video']:row['indiv'] for _,row in single_indiv_videos_df.iterrows()}
     model_path = REPO_ROOT / "models" / (model_name + '.pt')
+    #MODEL LOD+
     if  not os.path.exists(model_path):
         from PytorchWildlife.models import detection as pw_detection
         import supervision as sv

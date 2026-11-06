@@ -15,7 +15,6 @@ detection:
   tracker:  "ByteTrack"  # ByteTrack
   keep_detections_without_id: False #keep detections without indiv match from the frame_database
   save_videos_with_detections: False #save videos with detections and track ids to annotate detections when several individuals are in the videos (careful: body part is ignored, ear is used)
-  conf: 0.1 #for the head detector to tune (saved with the model?)
   tracked_videos_dir: "data/processed/tracked_videos"
   identification_threshold: 0.8 #portion of segmented ear of individual included in the detection box
 
@@ -85,6 +84,8 @@ feature_extractor:
     name: "ResNet50"
     last_layer: null              # output from last_layer
     last_frozen_layer: null
+    
+    
 
 training_parameters:
     batch_size: 64
@@ -96,6 +97,7 @@ training_parameters:
     early_stopping: 1.0
     num_workers: 0
     seed: 42
+    batch_norm_only: False #tune only batch normalization layers
     classification_head: "ClassificationHead"
 
 similarity_research:

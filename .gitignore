@@ -7,6 +7,9 @@ __pycache__/
 
 # SSH
 .ssh/
-
+*.ssh
+*.log
 # External repositories
-MobileSAM/
+.MobileSAM/
+/MobileSAM/
+/MobileSAM

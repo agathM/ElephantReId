@@ -35,9 +35,12 @@ import pdb
 #DETECTION CHOICES
 DETECT_CHOICES = ['ear_seg','body_detect','ear_detect','head_detect'] #'ear_seg','body_detect','ear_detect', 'head_detect'
 MODE = ["Day","Night"]
-FINETUNE = False
 RERUN_SOME_DETECT = False
 TEST = False
+ASSYMETRY = False #if True different labels for right and left ear
+
+#ARCHITECTURE CHOICE
+ARCHITECTURE = "ResNet50" # MiewID | MegaDescriptor | ResNet152 | ResNet50 | None if you choose last and frozen layer in pipeline.yaml
 
 #DEFAULT PARAMETERS FOR CHOICES
 REPO_ROOT = Path.cwd()
@@ -264,7 +267,7 @@ def build_training_args(
 
     args = argparse.Namespace(
         config=str(Path(config_path) / "pipeline.yaml"),
-        feature_extractor=None,
+        feature_extractor=ARCHITECTURE,
         last_layer=None,
         last_frozen_layer=None,
         crop_path=str(crop_path),
@@ -287,7 +290,7 @@ def build_training_args(
         augmentation_params=None,
         aug_params=AUG_PARAMS,
         preprocessing_function=None,
-        transform_params=None,
+        transform_params=None
     )
 
     return train_classifier.resolve_args(args)
@@ -477,7 +480,10 @@ def main(argv: list[str] | None = None) -> None:
                 crops_file = crops_dir / f"{model.split('.')[0]}.csv"
                 df = pd.read_csv(crops_file,dtype=CROPS_DTYPES)
                 df = df[~df.indiv.isna()]
-                df = df[(df.conf >= conf) & (df.area >= min_area)]
+                if conf:
+                    df = df[(df.conf >= conf)]
+                if min_area:
+                    df = df[(df.area >= min_area)]
                 if min_ratio:
                     df = df[df.ratio >= min_ratio]
                 if max_ratio:
@@ -490,7 +496,10 @@ def main(argv: list[str] | None = None) -> None:
                                 f"detection_filters.{script_name}"
                             )
                             df = filter_script.main(df, crops_dir, model)
-                df['label'] = df["indiv"] + "_" + label  # true left/right separation for ears?
+                if ASSYMETRY:
+                    df['label'] = df["indiv"] + "_" + df["detection"]
+                else:
+                    df['label'] = df["indiv"] + "_" + label  #same label for right and left ear
                 selected_dfs.append(df)
         print("selected_df",flush=True)
         selected_df = pd.concat(selected_dfs)
