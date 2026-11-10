@@ -813,6 +813,7 @@ def compute_features(
 
 def train_one_run(
     seed: int,
+    finetune: bool,
     make_train_loader: Callable[[int, bool], DataLoader],
     backbone: FeatureModel,
     val_dataset,
@@ -838,6 +839,10 @@ def train_one_run(
           required as soon as augmentation is active or the backbone is
           fine-tuned (otherwise features would be stale).
 
+    `finetune=False` disables backbone training entirely: all layers stay
+    frozen and only the classification head is trained (regardless of
+    `defreeze_epoch`).
+
     Training goes through ALL epochs (num_epoch): curves are collected to
     decide the stop epoch afterwards. If `min_acc_improvement` is set, the
     stop corresponds to the first epoch whose train accuracy improvement
@@ -862,6 +867,9 @@ def train_one_run(
     """
 
     set_seed(seed)
+    # FINETUNE=False: the backbone is never unfrozen, only the head trains.
+    if not finetune:
+        defreeze_epoch = None
     stop_epoch = None
     stop_head_state = None
     stop_backbone_state = None
@@ -1030,12 +1038,12 @@ def train_one_run(
                     (current_acc - previous_acc) / previous_acc * 100
                 )
                 is_stop_epoch = improvement < min_acc_improvement
-                if frozen:
+                if frozen and is_finetuned:
                     defreeze_epoch = epoch + 1
                     is_stop_epoch = None
-                elif (epoch + 1 - defreeze_epoch)<5:
+                elif defreeze_epoch is not None and (epoch + 1 - defreeze_epoch)<5:
                     is_stop_epoch = None
-                elif (epoch + 1 - aug_epoch)<5:
+                elif aug_epoch is not None and (epoch + 1 - aug_epoch)<5:
                     is_stop_epoch = None
 
 
@@ -1348,12 +1356,6 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
     splits_df = getattr(args, "splits_df", None)
     images_df = getattr(args, "images_df", None)
 
-    # Fallback for command-line usage: read the tables from CSV files.
-    if splits_df is None and getattr(args, "split_file", None):
-        splits_df = pd.read_csv(args.split_file)
-    if images_df is None and getattr(args, "crop_file", None):
-        images_df = pd.read_csv(args.crop_file)
-
     if splits_df is None or images_df is None:
         raise ValueError(
             "run_training expects 'splits_df' and 'images_df' DataFrames."
@@ -1587,6 +1589,7 @@ def run_training(args: argparse.Namespace) -> pd.DataFrame:
         ).to(device)
         result = train_one_run(
             args.seed,
+            args.finetune,
             make_train_loader,
             feature_model,
             val_dataset,
@@ -1844,8 +1847,7 @@ def resolve_path(home_path: Path, template: str, values: dict) -> Path:
 def resolve_config_paths(config: dict) -> dict:
     """Resolve the `paths.*` entries of the configuration.
 
-    Returns a dict with the keys crop_path, crop_file, split_file and
-    model_dir.
+    Returns a dict with the keys crop_path and model_dir.
     """
     paths = config.get("paths", {}) or {}
     values = build_path_values(config)
@@ -1854,12 +1856,6 @@ def resolve_config_paths(config: dict) -> dict:
     return {
         "crop_path": resolve_path(
             home_path, paths.get("crop_path", "data/crops"), values
-        ),
-        "crop_file": resolve_path(
-            home_path, paths.get("crop_file", "data/crops.csv"), values
-        ),
-        "split_file": resolve_path(
-            home_path, paths.get("split_file", "data/splits.csv"), values
         ),
         "model_dir": resolve_path(
             home_path, paths.get("model_dir", "models"), values
@@ -1922,6 +1918,8 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
         args.aug_epoch = training.get("aug_epoch", 1)
     if args.defreeze_epoch is None:
         args.defreeze_epoch = training.get("defreeze_epoch")
+    if getattr(args, "finetune", None) is None:
+        args.finetune = training.get("finetune", True)
     if args.early_stopping is None:
         args.early_stopping = training.get("early_stopping", 1.0)
     if args.num_workers is None:
@@ -1946,7 +1944,7 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
 
     # Paths: the command line takes precedence, otherwise the configuration.
     config_paths = resolve_config_paths(config)
-    for name in ("crop_path", "crop_file", "split_file", "model_dir"):
+    for name in ("crop_path", "model_dir"):
         if getattr(args, name, None) is None and name in config_paths:
             setattr(args, name, str(config_paths[name]))
 
@@ -1992,14 +1990,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--crop-path", default=None, help="dossier des crops")
     parser.add_argument(
-        "--crop-file", default=None,
-        help="table des crops (csv/ods) : image, video, label",
-    )
-    parser.add_argument(
-        "--split-file", default=None,
-        help="table des splits (csv/ods) : run, split",
-    )
-    parser.add_argument(
         "--out-dir", default=None, help="dossier de résultats"
     )
     parser.add_argument(
@@ -2016,6 +2006,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--defreeze-epoch", type=int, default=None,
         help="epoch (1-based) à partir de laquelle le backbone est fine-tuné",
+    )
+    parser.add_argument(
+        "--no-finetune", dest="finetune", action="store_false", default=None,
+        help="backbone gelé : seule la tête de classification est entraînée",
     )
     parser.add_argument(
         "--early-stopping", type=float, default=None,
@@ -2060,8 +2054,6 @@ def main(argv: list[str] | None = None) -> pd.DataFrame:
 
     required = {
         "crop_path": args.crop_path,
-        "crop_file": args.crop_file,
-        "split_file": args.split_file,
         "out_dir": args.out_dir,
     }
     missing = [name for name, value in required.items() if not value]

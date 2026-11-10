@@ -581,9 +581,12 @@ def process_video_seg(
                                 crop,
                             )
                             # new detection with id implies that new split will have to be created
-                            # new detection with id implies that new split will have to be created
                             if os.path.exists(split_dir):
                                 shutil.rmtree(split_dir)
+                                print("split_dir rmtree",flush=True)
+                            else:
+                                print("split_dir not found",flush=True)
+
                         row['indiv'] = indiv
                         last_detections[-1]['indiv'] = indiv
                         csv_rows.append(row)
@@ -771,6 +774,10 @@ def process_video_crop(
                             # new detection with id implies that new split will have to be created
                             if os.path.exists(split_dir):
                                 shutil.rmtree(split_dir)
+                                print("split_dir rmtree")
+                            else:
+                                print("split_dir not found")
+
                         row['indiv'] = indiv
                         last_detections[-1]['indiv'] = indiv
                         csv_rows.append(row)
@@ -958,6 +965,9 @@ def process_video_megadetector(
                                     # new detection with id implies that new split will have to be created
                                     if os.path.exists(split_dir):
                                         shutil.rmtree(split_dir)
+                                        print("split_dir rmtree")
+                                    else:
+                                        print("split_dir not found")
 
                                 row['indiv'] = indiv
                                 last_detections[-1]['indiv'] = indiv
@@ -984,6 +994,7 @@ def main(metadata:dict):
         save_videos_with_detections, tracked_videos_dir, labels,split_dir, rerun
     home_dir = Path(metadata['home_dir'])
     split_dir = Path(metadata['split_dir'])
+    print
     frame_database = home_dir / metadata['frame_database'] # REPO_ROOT / "database"
     frame_database_df = pd.read_csv(frame_database)
     frame_database_df.dropna(subset=["indiv"],inplace=True)

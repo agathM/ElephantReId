@@ -33,10 +33,12 @@ import numpy as np
 import pdb
 
 #DETECTION CHOICES
-DETECT_CHOICES = ['ear_seg','body_detect','ear_detect','head_detect'] #'ear_seg','body_detect','ear_detect', 'head_detect'
-MODE = ["Day","Night"]
+DETECT_CHOICES = ['ear_seg'] #'ear_seg','body_detect','ear_detect', 'head_detect'
+MODE = ["Day"]
 RERUN_SOME_DETECT = False
-TEST = False
+TEST = True
+TRAIN_CLASSIFIER = True
+FINETUNE = False
 ASSYMETRY = False #if True different labels for right and left ear
 
 #ARCHITECTURE CHOICE
@@ -94,9 +96,8 @@ CROPS_DTYPES = {
     "y2": int,
 }
 
-def load_config(config_dir: Path) -> dict:
+def load_config(config_path: Path) -> dict:
     """Load the pipeline configuration file."""
-    config_path = config_dir / "pipeline.yaml"
     with open(config_path, "r", encoding="utf-8") as file:
         return yaml.safe_load(file) or {}
 
@@ -248,33 +249,17 @@ def build_training_args(
     config_path: Path,
     results_dir: Path,
 ) -> argparse.Namespace:
-    paths = config.get("paths", {}) or {}
-    values = train_classifier.build_path_values(config)
-    home_path = Path(config.get("home_path", "..")).expanduser()
-
-    crop_path = train_classifier.resolve_path(
-        home_path, paths.get("crop_path", "data/crops"), values
-    )
-    crop_file = train_classifier.resolve_path(
-        home_path, paths.get("crop_file", "data/crops.csv"), values
-    )
-    split_file = train_classifier.resolve_path(
-        home_path, paths.get("split_file", "data/splits.csv"), values
-    )
-    model_dir = train_classifier.resolve_path(
-        home_path, paths.get("model_dir", "models"), values
-    )
+    home_dir = Path(config["home_dir"])
+    crop_path = home_dir / config["crops_dir"]
 
     args = argparse.Namespace(
-        config=str(Path(config_path) / "pipeline.yaml"),
+        config=str(config_path),
         feature_extractor=ARCHITECTURE,
+        finetune=FINETUNE,
         last_layer=None,
         last_frozen_layer=None,
         crop_path=str(crop_path),
-        crop_file=str(crop_file),
-        split_file=str(split_file),
         out_dir=str(results_dir),
-        model_dir=str(model_dir),
         batch_size=None,
         num_epoch=None,
         lr=None,
@@ -317,7 +302,7 @@ def check_inputs(args: argparse.Namespace) -> None:
 def build_untrained_summary(args: argparse.Namespace) -> pd.DataFrame:
     """Build a per-run summary without any training metric.
 
-    Used when ``FINETUNE`` is false: one row per run with split sizes and
+    Used when ``TRAIN_CLASSIFIER`` is false: one row per run with split sizes and
     detections, but columns coming from training (accuracy, loss, stop
     epoch, duration, ...) are left empty.
     """
@@ -382,27 +367,22 @@ def main(argv: list[str] | None = None) -> None:
 
     arg = parser.parse_args(argv)
 
-    config_dir = Path(arg.config).resolve()
-    if not config_dir.exists():
-        raise FileNotFoundError(f"Configuration introuvable : {config_dir}")
+    config_path = Path(arg.config).resolve()
+    if not config_path.exists():
+        raise FileNotFoundError(f"Configuration introuvable : {config_path}")
 
-    config = load_config(config_dir)
+    config = load_config(config_path)
 
     home_dir = Path(config['home_dir'])
     split_dir = Path(config['home_dir']) / config['split_dir']
     split_versions = config["split_versions"]
     frame_database = config["frame_database"]
     dataset_date = config["dataset_date"]
-    paths = config.get("paths", {}) or {}
-    results_root = train_classifier.resolve_path(
-        home_dir,
-        paths.get("output", "results"),
-        train_classifier.build_path_values(config),
-    )
+    results_root = home_dir / "results"
 
     version, results_dir = next_results_dir(results_root)
 
-    print(f"Configuration    : {config_dir}")
+    print(f"Configuration    : {config_path}")
     print(f"Dossier résultats: {results_dir}")
 
     # ------------------------------------------------------------
@@ -412,7 +392,7 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         (results_dir / "input_metadata").mkdir(parents=True, exist_ok=True)
-        shutil.copy2(config_dir / "pipeline.yaml", results_dir / "input_metadata" / "pipeline.yaml")
+        shutil.copy2(config_path, results_dir / "input_metadata" / "pipeline.yaml")
     except OSError as error:
         raise OSError(
             f"Impossible de créer le dossier de résultats '{results_dir}'.\n"
@@ -501,9 +481,8 @@ def main(argv: list[str] | None = None) -> None:
                 else:
                     df['label'] = df["indiv"] + "_" + label  #same label for right and left ear
                 selected_dfs.append(df)
-        print("selected_df",flush=True)
         selected_df = pd.concat(selected_dfs)
-        print("selected_df end concat",flush=True)
+        print(len(selected_df),flush=True)
         #GENERATE SPLIT OVER ALL DETECTIONS
         print("GENERATE NEW SPLIT")
         split_config["video_database"] = video_database_df
@@ -514,11 +493,11 @@ def main(argv: list[str] | None = None) -> None:
         splits_df, images_df, split_version = split.main(split_config)
         print(splits_df.head())
         print(images_df.head())
-    images_df = images_df.drop_duplicates(
-        subset=['event', 'label'],
-        keep='last'
-    ).reset_index(drop=True)
     if TEST:
+        images_df = images_df.drop_duplicates(
+            subset=['event', 'label'],
+            keep='last'
+        ).reset_index(drop=True)
         images_df = images_df[images_df.event.isin([i for i in range(10)])]
         splits_df = splits_df[splits_df.event.isin([i for i in range(10)])]
         label_to_split = images_df.merge(splits_df, how='inner', on='event').groupby('label').agg(set).to_dict()
@@ -534,7 +513,7 @@ def main(argv: list[str] | None = None) -> None:
     # ------------------------------------------------------------
     # 2) TRAINING
     # ------------------------------------------------------------
-    args = build_training_args(config, config_dir, results_dir)
+    args = build_training_args(config, config_path, results_dir)
 
     # The training script consumes the split/image DataFrames directly.
     args.crop_path = str(crops_dir)
@@ -542,12 +521,10 @@ def main(argv: list[str] | None = None) -> None:
     args.images_df = images_df
     
     check_inputs(args)
-    if FINETUNE:    
+    if TRAIN_CLASSIFIER:
         summary_df = train_classifier.run_training(args)
         if summary_df.empty:
             return
-        else:
-            summary_df = build_untrained_summary(args)
     else:
         summary_df = build_untrained_summary(args)
             
@@ -571,7 +548,7 @@ def main(argv: list[str] | None = None) -> None:
         else None
     )
 
-    if FINETUNE:
+    if TRAIN_CLASSIFIER:
         train_std = summary_df.train_acc.std(axis=0)
         val_std = summary_df.val_acc.std(axis=0)
         mean_train_acc_over_runs = (
@@ -604,6 +581,7 @@ def main(argv: list[str] | None = None) -> None:
             "split_event": config['split']['event'],
             "data_augmentation": describe_augmentation(config),
             "architecture": args.feature_extractor,
+            "finetune": FINETUNE,
             "last_fozen_layer": config["feature_extractor"]["last_frozen_layer"],
             "last_layer": config["feature_extractor"]["last_layer"],
             "mean_train_acc_over_runs": mean_train_acc_over_runs,

@@ -41,7 +41,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-import train_classifier  # noqa: E402
+import train_classifier
 
 CHUNK_SIZE = 2048
 OUTPUT_NAME = "val_cosine_similarity_pred.csv"
@@ -54,15 +54,10 @@ def load_run_tables(args: argparse.Namespace, run):
     splits_df = getattr(args, "splits_df", None)
     images_df = getattr(args, "images_df", None)
 
-    if splits_df is None:
-        if not getattr(args, "split_file", None):
-            raise ValueError("--split-file est requis.")
-        splits_df = pd.read_csv(args.split_file)
-
-    if images_df is None:
-        if not getattr(args, "crop_file", None):
-            raise ValueError("--crop-file est requis.")
-        images_df = pd.read_csv(args.crop_file)
+    if splits_df is None or images_df is None:
+        raise ValueError(
+            "run_similarity expects 'splits_df' and 'images_df' DataFrames."
+        )
 
     df = train_classifier.build_run_dataframe(images_df, splits_df, run)
     return df
@@ -373,12 +368,10 @@ def get_num_points(args: argparse.Namespace) -> int:
 
 
 def get_runs(args: argparse.Namespace) -> list:
-    """Return the runs from the splits file."""
+    """Return the runs from the splits table."""
     splits_df = getattr(args, "splits_df", None)
     if splits_df is None:
-        if not getattr(args, "split_file", None):
-            raise ValueError("--split-file est requis.")
-        splits_df = pd.read_csv(args.split_file)
+        raise ValueError("run_similarity expects a 'splits_df' DataFrame.")
     return sorted(splits_df["run"].dropna().unique().tolist())
 
 
@@ -406,7 +399,7 @@ def run_similarity(
     the pretrained backbone is used for all runs of the splits file.
 
     `args` must contain at least `out_dir`, `crop_path` and the
-    `splits_df` / `images_df` tables (or `split_file` / `crop_file`).
+    `splits_df` / `images_df` tables.
     """
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

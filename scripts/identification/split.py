@@ -475,7 +475,7 @@ def main(params: Dict[str, Any]) -> None:
     database = params["video_database"]
     database = database[database.video.isin(videos_with_detections)]
 
-    print(f"[INFO] Database with detections loaded: {database.shape}")
+    print(f"[INFO] Number of videos with detections in the video database: {database.shape[0]}")
 
     # 1) Assign an event to each video
     videos_with_event = assign_events_to_videos(database, event)

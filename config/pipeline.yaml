@@ -2,7 +2,7 @@
 dataset_date: "21/10/2026"
 video_database: "video_database.csv"
 frame_database: "frame_database.csv" #base de données avec soit indiv unique sur video soit coordonnées de l'oreille identifiée
-home_dir: "/sps/mnhn/ameurisse/ElephantReId" #"/home/agath/Documents/MNHN/code"#
+home_dir: "/home/agath/Documents/MNHN/code" #"/sps/mnhn/ameurisse/ElephantReId"
 crops_dir: "data/processed/crops"        # dossier des images de crops
 split_dir: "data/processed/crops/split_files"  # table des splits (run, split)
 split_versions: "splits_metadata.csv"
@@ -48,7 +48,7 @@ filter:
 
 #TRAIN / VAL SPLIT
 split:
-    event: "day"  # video, 5min, 1h, day
+    event: "5min"  # video, 5min, 1h, day
     max_runs: 2 #selection of the most different runs
     train_ratio: 0.75 #portion of train crops desired in training set
     min_crop_per_label_for_val: 10
@@ -106,4 +106,3 @@ similarity_research:
 # Execution
 paths:
   videos: "data/raw/indiv_videos"
-  output: "data/results"
