@@ -5,54 +5,65 @@ import cv2
 LUMINANCE = np.array([0.299, 0.587, 0.114])
 
 
-def original(image):
-    """Image originale, aucune transformation."""
-    return image
+def to_luminance(image):
+    """
+    Convertit une image PIL en luminance Rec. 601
+    (tableau HxW de floats dans [0, 1]).
+    """
+    array = np.asarray(image.convert("RGB")).astype(np.float32) / 255.0
+    return array @ LUMINANCE
+
+
+def to_rgb(luminance):
+    """
+    Convertit une luminance (HxW dans [0, 1]) en image PIL
+    à 3 canaux identiques (R = G = B).
+    """
+    gray = np.round(np.clip(luminance, 0, 1) * 255).astype(np.uint8)
+    return Image.fromarray(gray).convert("RGB")
+
 
 
 def grayscale(image):
-    """Image en niveaux de gris, reconvertie en RGB (3 canaux)."""
-    return image.convert("L").convert("RGB")
+    """Luminance Rec. 601 de l'image, en 3 canaux identiques."""
+    return to_rgb(to_luminance(image))
 
 
 def brightness_normalized(image, target_mean=0.5):
     """
-    Normalise la luminosité moyenne de l'image.
+    Normalise la luminosité moyenne de la luminance.
 
-    Chaque canal RGB est multiplié par target_mean / luminosité_moyenne.
-    Même principe que normalize_mean_brightness de montage_grayscale.py.
+    La luminance est multipliée par target_mean / luminance_moyenne,
+    puis clippée à [0, 1]. Sortie : 3 canaux identiques.
     """
-    array = np.asarray(image).astype(np.float32) / 255.0
+    luminance = to_luminance(image)
 
-    luminance = array @ LUMINANCE
     current_mean = luminance.mean()
 
     if current_mean == 0:
-        return image
+        return to_rgb(luminance)
 
-    factor = target_mean / current_mean
-
-    normalized = np.clip(array * factor, 0, 1)
-
-    return Image.fromarray(
-        (normalized * 255).astype(np.uint8)
+    normalized = np.clip(
+        luminance * (target_mean / current_mean),
+        0,
+        1,
     )
+
+    return to_rgb(normalized)
 
 
 def contrast_normalized(image):
     """
-    Normalise le contraste : (luminance - mean) / std, ramené à [0, 1]
-    pour la visualisation. L'image de sortie est en niveaux de gris.
-    Même principe que normalize_contrast de montage_grayscale.py.
+    Normalise le contraste : (luminance - mean) / std, ramené à [0, 1].
+    Sortie : 3 canaux identiques.
     """
-    array = np.asarray(image).astype(np.float32) / 255.0
+    luminance = to_luminance(image)
 
-    luminance = array @ LUMINANCE
     mean = luminance.mean()
     std = luminance.std()
 
     if std == 0:
-        return image
+        return to_rgb(luminance)
 
     normalized = (luminance - mean) / std
 
@@ -60,23 +71,19 @@ def contrast_normalized(image):
     max_value = normalized.max()
 
     if max_value == min_value:
-        return image
+        return to_rgb(luminance)
 
     scaled = (normalized - min_value) / (max_value - min_value)
-    gray = np.stack([scaled] * 3, axis=-1)
 
-    return Image.fromarray(
-        (gray * 255).astype(np.uint8)
-    )
+    return to_rgb(scaled)
 
 
 def clahe(image, clip_limit=2.0, tile_grid_size=(8, 8)):
     """
     Applique CLAHE (Contrast Limited Adaptive Histogram Equalization)
-    sur l'image en niveaux de gris, puis reconvertit en RGB.
-    Mêmes paramètres que montage_grayscale.py.
+    sur la luminance. Sortie : 3 canaux identiques.
     """
-    gray = np.asarray(image.convert("L"))
+    gray = np.round(to_luminance(image) * 255).astype(np.uint8)
 
     clahe = cv2.createCLAHE(
         clipLimit=clip_limit,
@@ -90,13 +97,10 @@ def clahe(image, clip_limit=2.0, tile_grid_size=(8, 8)):
 
 def histogram_equalized(image):
     """
-    Applique une histogram equalization GLOBALE (cv2.equalizeHist) sur
-    l'image en niveaux de gris, puis reconvertit en RGB.
-
-    Contrairement à CLAHE, l'égalisation est calculée sur l'histogramme
-    global de l'image (pas par tuiles locales).
+    Applique une égalisation d'histogramme GLOBALE (cv2.equalizeHist)
+    sur la luminance. Sortie : 3 canaux identiques.
     """
-    gray = np.asarray(image.convert("L"))
+    gray = np.round(to_luminance(image) * 255).astype(np.uint8)
 
     result = cv2.equalizeHist(gray)
 

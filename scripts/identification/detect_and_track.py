@@ -178,6 +178,43 @@ def append_rows(rows):
     df.to_csv(crops_file_path,index=False)
 
 
+def remove_video_detections(videos, crops_file_path, crops_dir):
+    """Delete every saved detection belonging to the given videos.
+
+    Removes the matching rows from the crops CSV and the associated crop
+    images (both identified and unidentified folders). Used before reprocessing
+    videos with ``RERUN_SOME_DETECT`` so their new detections do not duplicate
+    the previous ones.
+
+    Returns the number of removed detection rows.
+    """
+    videos = set(videos)
+    if not videos or not os.path.exists(crops_file_path):
+        return 0
+
+    detections = pd.read_csv(crops_file_path)
+    mask = detections["video"].isin(videos)
+    if not mask.any():
+        return 0
+
+    removed = detections[mask]
+    for _, row in removed.iterrows():
+        if pd.isna(row["image"]) or pd.isna(row["detection"]):
+            continue
+        label_dir = str(row["detection"]).replace(" ", "_")
+        image = row["image"]
+        for path in (
+            crops_dir / label_dir / image,
+            crops_dir / "unidentified" / label_dir / image,
+        ):
+            if path.exists():
+                path.unlink()
+
+    detections = detections[~mask]
+    detections.to_csv(crops_file_path, index=False)
+    return len(removed)
+
+
 def tracked_video_exists(tracked_videos_dir, video_path):
     """Return True if a video with the same stem already exists in tracked_videos_dir."""
     if tracked_videos_dir is None or not Path(tracked_videos_dir).exists():
@@ -1101,6 +1138,22 @@ def main(metadata:dict):
         with open(treated_path, "rb") as f:
             treated_videos = pickle.load(f)
         if rerun:
+            # Reprocessing a video appends new rows: delete its previous
+            # detections first so they are not duplicated in the CSV.
+            rerun_videos = (
+                treated_videos["some_detect"] & video_paths
+            ) - treated_videos["all_detect"]
+            n_removed = remove_video_detections(
+                rerun_videos,
+                crops_file_path,
+                crops_dir,
+            )
+            treated_videos["some_detect"].difference_update(rerun_videos)
+            if rerun_videos:
+                print(
+                    f"{len(rerun_videos)} some_detect videos cleared "
+                    f"({n_removed} detections removed)"
+                )
             videos_to_treat = video_paths.copy() - treated_videos["all_detect"]
             videos_to_treat.update(get_partially_treated_video_to_treat(treated_videos['some_detect']))
         else:

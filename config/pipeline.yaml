@@ -39,23 +39,23 @@ filter:
     max_ratio: null
     script: null
   ear_seg:
-    conf: 0.1
-    min_area: 10000
+    conf: null #0.1
+    min_area: null #10000
     min_ratio: null
-    max_ratio: 2.7
-    script:
-    - "seg_cut"
+    max_ratio: null #2.7
+    script: null
+    #- "seg_cut"
 
 #TRAIN / VAL SPLIT
 split:
-    event: "5min"  # video, 5min, 1h, day
-    max_runs: 2 #selection of the most different runs
+    event: "video"  # video, 5min, 1h, day
+    max_runs: 50 #selection of the most different runs
     train_ratio: 0.75 #portion of train crops desired in training set
     min_crop_per_label_for_val: 10
     force_val: True #if an indiv appears in more than 2 events, at least one is in val
 
 # Image preprocessing
-preprocessing_function: "brightness_normalized" #choose function from image_preprocessing or null
+preprocessing_function: null #"brightness_normalized" #choose function from image_preprocessing or null
 
 # Data augmentation
 data_augmentation:
@@ -84,15 +84,15 @@ feature_extractor:
     name: "ResNet50"
     last_layer: null              # output from last_layer
     last_frozen_layer: null
-    
-    
+
+
 
 training_parameters:
     batch_size: 64
-    num_epoch: 3
+    num_epoch: 30
     lr: 0.001 #0.5 	0.05 	0.005 	0.001 	0.0005 	0.0001 	0.00005
     pretrained: true
-    aug_epoch: 2      #epoch (1-based) from which augmentation is applied
+    aug_epoch: 5      #epoch (1-based) from which augmentation is applied
     defreeze_epoch: 3 #epoch after which layers are unfreeze for training feature extractor
     early_stopping: 1.0
     num_workers: 0

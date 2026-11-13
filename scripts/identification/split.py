@@ -116,7 +116,9 @@ def assign_events_to_videos(database: pd.DataFrame, event: str) -> tuple[pd.Data
     Assign event to dataframe
     """
     df = database.copy()
-
+    if event == "video":
+        df["event"] = df["video"]
+        return df
     # Normalize time
     if "time" not in df.columns:
         raise ValueError("The `database` must contain a 'time' column.")

@@ -17,7 +17,6 @@ Reads a YAML configuration file (default: `config/pipeline.yaml`) and:
 USAGE
 -----
     python -m scripts.pipeline -c config/pipeline.yaml
-    python -m scripts.pipeline -c config/pipeline.yaml --dry-run
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ import pdb
 DETECT_CHOICES = ['ear_seg'] #'ear_seg','body_detect','ear_detect', 'head_detect'
 MODE = ["Day"]
 RERUN_SOME_DETECT = False
-TEST = True
+TEST = False
 TRAIN_CLASSIFIER = True
 FINETUNE = False
 ASSYMETRY = False #if True different labels for right and left ear
@@ -60,12 +59,13 @@ for choice in DETECT_CHOICES:
 # Data-augmentation flags: only transformations set to True are applied.
 # The matching parameters are read from
 # `data_augmentation.torch_transformation.params` in pipeline.yaml.
+
 AUG_PARAMS = {
-    "rotation": True,
-    "translation": True,
-    "scaling": True,
-    "saturation": True,
-    "hue": True,
+    "rotation": False,
+    "translation": False,
+    "scaling": False,
+    "saturation": False,
+    "hue": False,
 }
 
 
@@ -359,10 +359,6 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--config", "-c", default="config/pipeline.yaml",
         help="fichier de configuration du pipeline",
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="prépare le dossier de résultats sans entraîner",
     )
 
     arg = parser.parse_args(argv)

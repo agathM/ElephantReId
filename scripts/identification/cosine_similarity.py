@@ -97,13 +97,14 @@ def build_datasets_and_metadata(
             f"(train={len(train_df)}, val={len(val_df)})."
         )
 
-    # Keep all useful split metadata (camera, mode, entry_day, etc.).
-    # Columns overwritten by the prediction are excluded to avoid duplicates.
+    # Keep only the metadata columns also present in val_pred_early_stop.
+    # Neighbour columns are added by build_prediction_df.
     reserved_columns = {"run", "pred_label", "margin", "logits", "conf"}
     metadata_columns = [
         column
         for column in val_df.columns
-        if column not in reserved_columns
+        if column in train_classifier.VAL_PRED_COLUMNS
+        and column not in reserved_columns
     ]
     val_metadata = val_df[metadata_columns].to_dict("records")
 
@@ -339,12 +340,11 @@ def build_prediction_df(
         if column not in df.columns:
             df[column] = None
 
-    extra_columns = [
-        column
-        for column in df.columns
-        if column not in train_classifier.VAL_PRED_COLUMNS
-    ]
-    ordered_columns = train_classifier.VAL_PRED_COLUMNS + extra_columns
+    label_columns = [f"label_{rank + 1}" for rank in range(k)]
+    sim_columns = [f"sim_{rank + 1}" for rank in range(k)]
+    ordered_columns = (
+        train_classifier.VAL_PRED_COLUMNS + label_columns + sim_columns
+    )
     return df[ordered_columns]
 
 

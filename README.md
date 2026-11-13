@@ -9,27 +9,26 @@ and records every experiment in a summary table.
 The pipeline is organized in five stages:
 
 ```text
-config/pipeline.yaml
+<config_path>
         |
         v
-[1] detection + tracking      -> crops + detection CSV + treated-video state
+[1] detection + tracking      -> intermediate: crops + detection CSV + treated-video state
         |
         v
-[2] filtering + split         -> filtered detections + event/run/split tables
+[2] filtering + split         -> intermediate: split tables
         |
         v
-[3] preprocessing/augmentation + training (optional) -> weights + metrics
+[3] preprocessing/augmentation + training (optional) -> experiment output: model weights + validation predictions + train & validation accuracy and curves
         |
         v
-[4] cosine-similarity evaluation -> validation predictions + accuracy
+[4] cosine-similarity evaluation -> experiment output: validation predictions + validation accuracy
         |
         v
-[5] experiment summary        -> all_experiments.csv
+[5] experiment summary        -> <results_root>/all_experiments.csv
 ```
 
-All paths below are relative to `home_dir` (from `config/pipeline.yaml`) unless
-stated otherwise. The configuration file itself and the `models/` directory are
-relative to the repository root.
+All data paths below are expressed with the path variables defined in section
+2.1. The `scripts/...` code folder remains relative to the repository root.
 
 ---
 
@@ -43,14 +42,11 @@ Run from the repository root so that flat imports
 python scripts/identification/pipeline.py -c config/pipeline.yaml
 ```
 
-The scripts can not also be run individually.
-
 ### CLI arguments of `pipeline.py`
 
 | Argument | Default | Description |
 |---|---|---|
 | `-c`, `--config` | `config/pipeline.yaml` | YAML configuration file. It is copied into the result folder. |
-| `--dry-run` | `False` | Accepted by the parser but currently has no effect: the pipeline still runs all stages. |
 
 ### Module-level switches (in `pipeline.py`, not in YAML)
 
@@ -68,14 +64,6 @@ These constants must be edited directly in `scripts/identification/pipeline.py`:
 | `TRAIN_CLASSIFIER`  | `True`                                                    | Whether `train_classifier.py` runs **at all**. If `False`, no training happens (not even the head): the pipeline prepares data and runs cosine similarity with the pretrained backbone. |
 | `FINETUNE`          | `False`                                                   | Only used when `TRAIN_CLASSIFIER = True`; decides **what** is trained. If `False`, the backbone stays fully frozen (whatever `defreeze_epoch`) and only the `ClassificationHead` is trained. If `True`, the layers between `last_frozen_layer` and `last_layer` are fine-tuned from `defreeze_epoch`. |
 
-Typical combinations:
-
-| `TRAIN_CLASSIFIER` | `FINETUNE` | Behaviour |
-|---|---|---|
-| `True`  | `True`  | Full training: head + backbone fine-tuning from `defreeze_epoch`; backbone weights saved. |
-| `True`  | `False` | Head-only training on frozen-backbone features; no weights saved. |
-| `False` | –      | No training: data preparation + cosine similarity on the pretrained backbone. |
-
 ### Detection models selected by `DETECT_CHOICES`
 
 | `DETECT_CHOICES` value | Model key | Default confidence | Classes kept |
@@ -92,32 +80,44 @@ Two choices can share the same model: `ear_detect` and `head_detect` both use
 
 ## 2. Inputs
 
-### 2.1 Input files and folders
+### 2.1 Path variables
+
+All data paths in this document use the following variables instead of literal
+paths:
+
+| Variable | Source | Description |
+|---|---|---|
+| `<config_path>` | CLI `-c/--config` | Pipeline YAML file (default `config/pipeline.yaml`). |
+| `<repository_root>` | fixed | Repository root (current working directory). |
+| `<home_dir>` | `home_dir` | Root of the data directory. |
+| `<video_database>` | `video_database` | Video database CSV, relative to `<home_dir>`. |
+| `<frame_database>` | `frame_database` | Frame database CSV, relative to `<home_dir>`. |
+| `<videos_dir>` | `detection.videos_dir` | Source video folder, relative to `<home_dir>`. |
+| `<crops_dir>` | `crops_dir` | Root of crops and detection CSVs, relative to `<home_dir>`. |
+| `<split_dir>` | `split_dir` | Split tables folder, relative to `<home_dir>`. |
+| `<tracked_videos_dir>` | `detection.tracked_videos_dir` | Annotated videos folder, relative to `<home_dir>`. |
+| `<results_root>` | fixed | Results root, currently `<home_dir>/results`. |
+| `<models_dir>` | fixed | Model weights folder (`models`), relative to `<repository_root>`. |
+| `<model>` | model key | Detection model currently processed (e.g. `seg_ears_lr_v2`). |
+| `<detection_class>` | model class name | Detection class folder (e.g. `ear_seg`). |
+| `<version>` | generated | Experiment result version (`v1`, `v2`, ...). |
+| `<split_version>` | stored in `splits_metadata.csv` | Split version (`v1`, `v2`, ...). |
+
+### 2.2 Input files and folders
 
 ```text
 <home_dir>/
-├── video_database.csv                  # one row per individual per video
-├── frame_database.csv                  # ear localisation of individuals per frame
-├── data/raw/indiv_videos/              # source videos (detection.videos_dir)
-├── data/processed/crops/               # crops_dir
-│   ├── <model>.csv                     # detection metadata for this model
-│   ├── <model>/treated_videos.pkl      # processed-video state
-│   ├── <model>/<detection_class>/      # identified crops
-│   ├── <model>/unidentified/<class>/   # unmatched crops (optional)
-│   └── split_files/                    # split_dir
-│       ├── splits_metadata.csv
-│       ├── vN_splits.csv
-│       └── vN_selected_images.csv
-└── data/results/                       # paths.output (results root)
+├── <video_database>       # one row per individual per video
+├── <frame_database>       # ear localisation of individuals per frame
+└── <videos_dir>/          # source videos
 
 <repository_root>/
-└── models/
-    ├── seg_ears_lr_v2.pt
-    ├── head_ears_detect_09_08.pt
-    └── MDV6-yolov10-e.pt               # optional: MegaDetector is downloaded otherwise
+└── <models_dir>/
+    ├── <model>.pt         # YOLO model weights
+    └── ...                # one file per model key
 ```
 
-### 2.2 `video_database.csv`
+### 2.3 `<video_database>`
 
 One row per individual appearing in a video. The pipeline uses `video`, `time`,
 `camera`, `mode`, `several_indivs` and `indiv`.
@@ -130,11 +130,10 @@ One row per individual appearing in a video. The pipeline uses `video`, `time`,
 | `camera` | Camera name. Used for event grouping and tracker reset. |
 | `mode` | `Day` or `Night`. Filtered with `MODE`. |
 | `several_indivs` | `True`/`False`. If `False`, every detection in the video is directly assigned to this individual. |
-| `entry`, `entry_day` | Optional metadata; not used by the pipeline. |
 | `date` | Optional metadata; not used by the pipeline. |
 | `Description` | Free text; not used by the pipeline. |
 
-### 2.3 `frame_database.csv`
+### 2.4 `<frame_database>`
 
 Database of localized ear detections used to associate a tracked crop with an
 individual when several animals appear in the same video. The pipeline reads
@@ -147,57 +146,27 @@ individual when several animals appear in the same video. The pipeline reads
 | `frame` | Frame number. |
 | `x1`, `y1`, `x2`, `y2` | Bounding box of the segmented/identified ear. |
 | `indiv` | Individual name. Required for linking. |
-| `track`, `label`, `image`, `conf`, `area`, `ratio`, `avg_conf` | Typical additional detection columns (same family as the detection CSV); not required by the linking code. |
+| `track`, `label`, `image`, `conf`, `area`, `ratio` | Typical additional detection columns (same family as the detection CSV); not required by the linking code. |
 
 Association rule:
 
 - if the video has `several_indivs == False`, the individual comes from
-  `video_database.csv`;
+  `<video_database>`;
 - otherwise, the pipeline computes the proportion of the frame-database ear box
   that is contained in the detection box. The best match is kept if this
   proportion is greater than `detection.identification_threshold`.
 
-### 2.4 Videos and models
+### 2.5 Videos and models
 
-- Videos must be in `detection.videos_dir` (`data/raw/indiv_videos` by default).
-- YOLO models must be placed in `models/<model_key>.pt`.
-- If `models/<model_key>.pt` is missing, the code treats `<model_key>` as a
+- Videos must be in `<videos_dir>`.
+- YOLO models must be placed in `<models_dir>/<model>.pt`.
+- If `<models_dir>/<model>.pt` is missing, the code treats `<model>` as a
   MegaDetectorV6 version and instantiates it through `PytorchWildlife`.
 - For YOLO models, the processing mode is inferred from the model name:
   `"detect"` in the name -> bounding-box pipeline, otherwise segmentation
   pipeline. Detection class names must therefore contain `detect` or `seg`.
 
-### 2.5 Input detection CSV (`crops_dir/<model>.csv`)
-
-This CSV is produced by `detect_and_track.py` and consumed by the filtering
-stage. The pipeline reads columns by name, so their order is not significant.
-
-| Column | Type | Description |
-|---|---|---|
-| `image` | str | Crop filename: `<video_stem>_fr_<frame:06d>_t<track_id>.png`. |
-| `video` | str | Source video filename. |
-| `frame` | int | Original frame number in the video. |
-| `track_id` | int | Tracker identifier. |
-| `detection` | str | Detection class (e.g. `head_detect`, `left_ear_seg`). |
-| `conf` | float | Detection confidence. |
-| `x1`, `y1`, `x2`, `y2` | int | Bounding box. For segmentation, the box around the mask (with a 1 px border). |
-| `area` | int | Mask pixel count for segmentation; `width * height` for detection. |
-| `ratio` | float | `width / height` (rounded to 1 decimal by the detection code). |
-| `indiv` | str / NaN | Linked individual, or empty when no match was found. Empty rows are discarded by the filtering stage. |
-
-### 2.6 Input split files (`split_dir`)
-
-`splits_metadata.csv` records the parameters of every already-computed split.
-If a row matches the current split + filter parameters, its split version is
-reused instead of recomputing a new split.
-
-| Column | Description |
-|---|---|
-| `event`, `max_runs`, `train_ratio`, `min_crop_per_label_for_val`, `force_val` | Split parameters. |
-| `<label>_conf`, `<label>_min_area`, `<label>_min_ratio`, `<label>_max_ratio`, `<label>_script` | One group of filter columns per detection label. Groups of labels that are not selected are filled with empty values. |
-| `version` | Split version (`v1`, `v2`, ...). |
-
-### 2.7 Image preprocessing functions
+### 2.6 Image preprocessing functions
 
 `preprocessing_function` must name a function of
 `scripts/identification/image_preprocessing.py`:
@@ -209,35 +178,46 @@ reused instead of recomputing a new split.
 - `clahe`
 - `histogram_equalized`
 
+All functions compute the Rec. 601 luminance of the crop and return a
+grayscale image with 3 identical channels (R = G = B): only the photometric
+normalization differs between them. Set `preprocessing_function`
+to `null` to keep the colour image unchanged.
+
+Consequence: with any of these functions, the `ColorJitter` `saturation` and
+`hue` augmentations have no effect (they are identities on grayscale images).
+
 Set it to `null` to disable preprocessing.
 
-### 2.8 YAML configuration reference
+### 2.7 YAML configuration reference
+
+Path values are shown with the variables of section 2.1; their actual default
+values are defined in `config/pipeline.yaml`.
 
 #### Database and paths
 
-| Key | Default / example | Description |
+| Key | Variable | Description |
 |---|---|---|
 | `dataset_date` | `"21/10/2026"` | Experiment date stored in `all_experiments.csv`. `/` are replaced by `_` when used in paths. |
-| `video_database` | `"video_database.csv"` | Video database path, relative to `home_dir`. |
-| `frame_database` | `"frame_database.csv"` | Frame database path, relative to `home_dir`. |
-| `home_dir` | absolute path | Root of the data directory. |
-| `crops_dir` | `"data/processed/crops"` | Root of crops and detection CSVs, relative to `home_dir`. |
-| `split_dir` | `"data/processed/crops/split_files"` | Split tables folder, relative to `home_dir`. |
-| `split_versions` | `"splits_metadata.csv"` | Split metadata filename inside `split_dir`. |
-| `paths.output` | `"data/results"` | Results root, relative to `home_dir`. |
-| `paths.videos` | `"data/raw/indiv_videos"` | Informational; detection uses `detection.videos_dir`. |
+| `video_database` | `<video_database>` | Video database path, relative to `<home_dir>`. |
+| `frame_database` | `<frame_database>` | Frame database path, relative to `<home_dir>`. |
+| `home_dir` | `<home_dir>` | Root of the data directory. |
+| `crops_dir` | `<crops_dir>` | Root of crops and detection CSVs, relative to `<home_dir>`. |
+| `split_dir` | `<split_dir>` | Split tables folder, relative to `<home_dir>`. |
+| `split_versions` | `splits_metadata.csv` | Split metadata filename inside `<split_dir>`. |
+| `paths.output` | not used | Results root is currently fixed to `<results_root>`. |
+| `paths.videos` | `<videos_dir>` | Informational; detection uses `detection.videos_dir`. |
 
 #### `detection`
 
 | Key | Default | Description |
 |---|---|---|
-| `videos_dir` | `"data/raw/indiv_videos"` | Folder containing source videos, relative to `home_dir`. |
-| `images_dir` | `"data/raw/"` | Kept for compatibility; not used by the detection code. |
+| `videos_dir` | `<videos_dir>` | Folder containing source videos, relative to `<home_dir>`. |
+| `images_dir` | unused | Kept for compatibility; not used by the detection code. |
 | `fps` | `2` | Target inference rate. The stride is `round(video_fps / fps)`: YOLO runs every N frames. |
 | `tracker` | `"ByteTrack"` | Tracker name. For YOLO, converted to `<name>.yaml`; for MegaDetector, `ByteTrack` is used through `supervision`. |
-| `keep_detections_without_id` | `False` | Save unmatched crops under `<model>/unidentified/<class>/`. |
+| `keep_detections_without_id` | `False` | Save unmatched crops under `<model>/unidentified/<detection_class>/`. |
 | `save_videos_with_detections` | `False` | Write an annotated video for videos that contain unmatched detections. |
-| `tracked_videos_dir` | `"data/processed/tracked_videos"` | Output folder for annotated videos, relative to `home_dir`. |
+| `tracked_videos_dir` | `<tracked_videos_dir>` | Output folder for annotated videos, relative to `<home_dir>`. |
 | `identification_threshold` | `0.8` | Minimal proportion of the frame-database ear box that must be inside the detection box to link an individual. |
 
 #### `filter`
@@ -274,10 +254,7 @@ Split rules, in priority order:
 4. With `force_val`, the second event of a two-event label goes to validation.
 5. Remaining events are assigned by minimizing the distance to `train_ratio`.
 
-After splitting, `pipeline.py` keeps **one crop per `(event, label)` pair**
-(the last row). The copy written into the results folder is therefore
-deduplicated, while the copy written by `split.py` in `split_dir` keeps all
-crops.
+The split is saved both in the experiment result folder and in `<split_dir>`.
 
 #### `preprocessing_function` and `data_augmentation`
 
@@ -340,13 +317,16 @@ For each chosen model:
 `all_detect` contains videos where every detection was matched; `some_detect`
 contains videos with at least one unmatched detection.
 
-When `RERUN_SOME_DETECT` is `True`, `get_partially_treated_video_to_treat()`
-re-checks unmatched rows: crops that can now be matched are moved from
-`unidentified/` to the identified folder, the CSV is updated, and only videos
-whose crop file is missing are processed again.
+When `RERUN_SOME_DETECT` is `True`, every video in `some_detect` is processed
+again. Before processing, `remove_video_detections()` deletes all its previous
+detections (matching CSV rows and crop images in both the identified and
+`unidentified/` folders) so the new run does not duplicate the old rows.
+`get_partially_treated_video_to_treat()` then re-checks any remaining unmatched
+rows: crops that can now be matched are moved from `unidentified/` to the
+identified folder, and the CSV is updated.
 
 **Important side effect:** whenever a new identified detection is written, the
-whole `split_dir` is deleted (`shutil.rmtree`). All existing split files become
+whole `<split_dir>` is deleted (`shutil.rmtree`). All existing split files become
 invalid and must be recomputed.
 
 ### 3.2 Filtering
@@ -365,7 +345,7 @@ All selected dataframes are concatenated.
 Events are assigned to videos using the camera and `time` columns. The split
 either enumerates all train/validation combinations (when
 `2^free_events <= max_runs`) or uses a deterministic greedy procedure with
-`max_runs` seeds. See the rules and parameters in section 2.8.
+`max_runs` seeds. See the rules and parameters in section 2.7.
 
 ### 3.4 Training (`train_classifier.py`)
 
@@ -377,7 +357,7 @@ either enumerates all train/validation combinations (when
   `ClassificationHead`.
 - Loss: cross-entropy. Optimizer: Adam. Scheduler: `ReduceLROnPlateau`.
 - `FINETUNE` decides what is trained: `True` -> head + the backbone layers
-  between `last_frozen_layer` and `last_layer`, unfrozen from `defreeze_epoch`;
+  between `last_frozen_layer` and `last_layer`, unfrozen from `defreeze_epoch` or when early stopping is reached;
   `False` -> fully frozen backbone (whatever `defreeze_epoch`), only the
   `ClassificationHead` trains. `TRAIN_CLASSIFIER = False` skips training
   entirely.
@@ -391,8 +371,8 @@ either enumerates all train/validation combinations (when
 
 For each run:
 
-1. Load `models/model_run_<run>.pth` if it exists; otherwise use the pretrained
-   backbone.
+1. Load `<version>/models/model_run_<run>.pth` if it exists; otherwise use the
+   pretrained backbone.
 2. Compute train and validation features with the same preprocessing as
    training (no augmentation).
 3. Normalize features and find the `num_points` closest train features for each
@@ -402,55 +382,52 @@ For each run:
 
 ### 3.6 Experiment summary
 
-One row per pipeline execution is appended to `all_experiments.csv`. The
-versioned result folder (`v1`, `v2`, ...) identifies the experiment.
+One row per pipeline execution is appended to
+`<results_root>/all_experiments.csv`. The versioned result folder
+`<results_root>/<version>/` identifies the experiment.
 
 ---
 
-## 4. Outputs
+## 4. Intermediate outputs
 
-### 4.1 Output folder tree
+Produced by detection and splitting and consumed
+by the training stage.
+
+### 4.1 Detection outputs
 
 ```text
 <crops_dir>/
 ├── <model>.csv                          # detection metadata (input of filtering)
-├── <model>/
-│   ├── treated_videos.pkl               # {"all_detect": set, "some_detect": set}
-│   ├── <detection_class>/<image>.png    # identified crops
-│   └── unidentified/<class>/<image>.png # only if keep_detections_without_id
-└── split_files/
-    ├── splits_metadata.csv              # appended metadata, one row per split
-    ├── vN_splits.csv                    # event, run, split
-    └── vN_selected_images.csv           # all crops with event, no dedup
+└── <model>/
+    ├── treated_videos.pkl               # {"all_detect": set, "some_detect": set}
+    ├── <detection_class>/<image>.png    # identified crops
+    └── unidentified/<detection_class>/<image>.png  # only if keep_detections_without_id
 
 <tracked_videos_dir>/<model>/<video_stem>.mp4   # only if save_videos_with_detections
-
-<results root>/                          # paths.output, e.g. data/results
-├── all_experiments.csv                  # appended summary, one row per pipeline run
-└── vN/                                  # next available version
-    ├── input_metadata/
-    │   ├── pipeline.yaml                # copy of the configuration used
-    │   ├── <split_version>_splits.csv
-    │   └── <split_version>_selected_images.csv
-    ├── models/
-    │   └── model_run_<run>.pth          # only if fine-tuned
-    ├── train_curv_run_<run>.png         # per-run loss/accuracy curves
-    ├── val_pred_early_stop.csv          # validation predictions at stop epoch
-    ├── runs_summary.csv                 # per-run metrics
-    ├── val_cosine_similarity_pred.csv   # cosine predictions
-    └── cosine_accuracy_summary.csv      # per-run cosine accuracy
 ```
 
-### 4.2 `crops_dir/<model>.csv`
+### 4.2 Detection CSV (`<crops_dir>/<model>.csv`)
 
-Same columns as the input detection CSV described in section 2.5:
-`image, video, frame, track_id, detection, conf, x1, y1, x2, y2, area, ratio,
-indiv`.
+This CSV is produced by `detect_and_track.py` and consumed by the filtering
+stage. The pipeline reads columns by name, so their order is not significant.
+
+| Column | Type | Description |
+|---|---|---|
+| `image` | str | Crop filename: `<video_stem>_fr_<frame:06d>_t<track_id>.png`. |
+| `video` | str | Source video filename. |
+| `frame` | int | Original frame number in the video. |
+| `track_id` | int | Tracker identifier. |
+| `detection` | str | Detection class (e.g. `head_detect`, `left_ear_seg`). |
+| `conf` | float | Detection confidence. |
+| `x1`, `y1`, `x2`, `y2` | int | Bounding box. For segmentation, the box around the mask (with a 1 px border). |
+| `area` | int | Mask pixel count for segmentation; `width * height` for detection. |
+| `ratio` | float | `width / height` (rounded to 1 decimal by the detection code). |
+| `indiv` | str / NaN | Linked individual, or empty when no match was found. Empty rows are discarded by the filtering stage. |
 
 Rows are prepended to the existing file after each processed video, then the
 whole CSV is rewritten. Existing rows are preserved.
 
-### 4.3 `treated_videos.pkl`
+### 4.3 Detection state (`<crops_dir>/<model>/treated_videos.pkl`)
 
 Python pickle dictionary:
 
@@ -461,7 +438,16 @@ Python pickle dictionary:
 
 The file is rewritten after each processed video.
 
-### 4.4 `split_files/splits_metadata.csv`
+### 4.4 Split outputs
+
+```text
+<split_dir>/
+├── splits_metadata.csv
+├── <split_version>_splits.csv
+└── <split_version>_selected_images.csv
+```
+
+### 4.5 Split metadata (`<split_dir>/splits_metadata.csv`)
 
 One appended row per computed split. Columns:
 `event, max_runs, train_ratio, min_crop_per_label_for_val, force_val`, then the
@@ -471,7 +457,7 @@ filter columns (`<label>_conf`, `<label>_min_area`, `<label>_min_ratio`,
 If an identical parameter row already exists, the existing split version is
 reused and no new split is computed.
 
-### 4.5 `split_files/vN_splits.csv` and results copy
+### 4.6 Split assignment (`<split_dir>/<split_version>_splits.csv`)
 
 | Column | Description |
 |---|---|
@@ -479,9 +465,10 @@ reused and no new split is computed.
 | `run` | Run number (starts at 1). |
 | `split` | `train` or `val`. |
 
-The version copied into `<results>/vN/input_metadata/` has the same content.
+The version copied into `<results_root>/<version>/input_metadata/` has the same
+content.
 
-### 4.6 `split_files/vN_selected_images.csv` and results copy
+### 4.7 Selected images (`<split_dir>/<split_version>_selected_images.csv`)
 
 | Column | Type | Description |
 |---|---|---|
@@ -498,10 +485,35 @@ The version copied into `<results>/vN/input_metadata/` has the same content.
 | `event` | int | Event assigned from the video database. |
 
 The `video` column is replaced by `event`. The file written by `split.py` in
-`split_dir` contains all crops; the copy written into the results folder is
-deduplicated on `(event, label)` (last row kept).
+`<split_dir>` contains all crops; the copy written into the experiment result
+folder is deduplicated on `(event, label)` (last row kept).
 
-### 4.7 `runs_summary.csv`
+## 5. Experiment output
+
+The only experiment output is the versioned result folder
+`<results_root>/<version>/`. The experiment summary is stored next to it in
+`<results_root>/all_experiments.csv`.
+
+### 5.1 Experiment result folder
+
+```text
+<results_root>/
+├── all_experiments.csv                  # appended summary, one row per pipeline run
+└── <version>/                           # next available version
+    ├── input_metadata/
+    │   ├── pipeline.yaml                # copy of the configuration used
+    │   ├── <split_version>_splits.csv
+    │   └── <split_version>_selected_images.csv
+    ├── models/
+    │   └── model_run_<run>.pth          # only if fine-tuned
+    ├── train_curv_run_<run>.png         # per-run loss/accuracy curves
+    ├── val_pred_early_stop.csv          # validation predictions at stop epoch
+    ├── runs_summary.csv                 # per-run metrics
+    ├── val_cosine_similarity_pred.csv   # cosine predictions
+    └── cosine_accuracy_summary.csv      # per-run cosine accuracy
+```
+
+### 5.2 `runs_summary.csv`
 
 Written by `train_classifier.py` after training and then updated by
 `pipeline.py` with cosine accuracy and crop weights.
@@ -528,7 +540,7 @@ Written by `train_classifier.py` after training and then updated by
 When no fine-tuning is performed, the training metrics are left empty (NaN)
 and only split sizes, cosine accuracy and weights are meaningful.
 
-### 4.8 `val_pred_early_stop.csv`
+### 5.3 `val_pred_early_stop.csv`
 
 Validation predictions at the stop epoch, appended after each run.
 
@@ -546,32 +558,28 @@ Validation predictions at the stop epoch, appended after each run.
 | `logits` | Raw class scores (Python list). |
 | `conf` | Probability of the predicted class. |
 
-### 4.9 `val_cosine_similarity_pred.csv`
+### 5.4 `val_cosine_similarity_pred.csv`
 
-Cosine-similarity predictions, appended per run. The first columns are the same
-as `val_pred_early_stop.csv`, with `conf` and `margin` computed from the
-majority vote. Additional columns come from the selected-images row and the
-neighbour search:
+Cosine-similarity predictions, appended per run. It has exactly the same
+columns as `val_pred_early_stop.csv`, in the same order, plus the neighbour
+columns:
 
 | Column | Description |
 |---|---|
-| `frame`, `track_id`, `x1`, `y1`, `x2`, `y2`, `area`, `ratio` | Crop metadata. |
-| `event` | Event identifier. |
-| `split` | `val` (validation crops only). |
+| `run`, `model_name`, `detection`, `image`, `video`, `indiv`, `label`, `pred_label`, `margin`, `logits`, `conf` | Same columns as `val_pred_early_stop.csv`. `conf` and `margin` are computed from the majority vote; `logits` contains the per-class vote fractions. |
 | `label_1` ... `label_k` | Labels of the `k` nearest train crops. |
 | `sim_1` ... `sim_k` | Cosine similarities of these neighbours. |
 
 `k` is `similarity_research.num_points` (capped by the number of train crops).
-`logits` here contains the per-class vote fractions.
 
-### 4.10 `cosine_accuracy_summary.csv`
+### 5.5 `cosine_accuracy_summary.csv`
 
 | Column | Description |
 |---|---|
 | `run` | Run identifier. |
 | `cosine_acc` | Validation accuracy (%) of the cosine majority vote. |
 
-### 4.11 `all_experiments.csv`
+### 5.6 `all_experiments.csv`
 
 One row appended per pipeline execution, sorted by `version`.
 
@@ -594,7 +602,7 @@ One row appended per pipeline execution, sorted by `version`.
 | `mean_cosine_acc_over_run` | Aggregated cosine accuracy over runs. |
 | `val_cosine_acc_std` | Standard deviation of cosine accuracy over runs. |
 
-### 4.12 `models/model_run_<run>.pth`
+### 5.7 `<version>/models/model_run_<run>.pth`
 
 Checkpoint saved only when the backbone was fine-tuned:
 
@@ -613,64 +621,12 @@ Checkpoint saved only when the backbone was fine-tuned:
 
 ---
 
-## 5. File writing, appending and deletion rules
-
-### Created
-
-- A new results version folder `<results>/vN` on every pipeline execution.
-- `<results>/vN/input_metadata/pipeline.yaml` (copy of the configuration).
-- `<results>/vN/input_metadata/<split_version>_{splits,selected_images}.csv`.
-- `<results>/all_experiments.csv` on the first execution.
-- Crop folders and `unidentified` folders for each kept detection class.
-- Split files `vN_splits.csv` and `vN_selected_images.csv` in `split_dir`.
-
-### Appended / rewritten
-
-- `<crops_dir>/<model>.csv`: new rows are prepended, then the whole file is
-  rewritten after every processed video.
-- `<crops_dir>/<model>/treated_videos.pkl`: rewritten after every processed
-  video.
-- `split_dir/splits_metadata.csv`: new split metadata rows are appended.
-- `val_pred_early_stop.csv`: deleted at the start of each training execution,
-  then appended after each run.
-- `val_cosine_similarity_pred.csv`: appended after each run. Because a new
-  `vN` folder is created for each pipeline execution, normal usage does not
-  create duplicates.
-- `runs_summary.csv`: written by training, then overwritten by `pipeline.py`
-  when cosine results are merged.
-- `cosine_accuracy_summary.csv`: overwritten.
-- `all_experiments.csv`: one row appended per execution, then the file is
-  rewritten sorted by `version`.
-
-### Deleted
-
-- `next_results_dir()` removes result folders `vN` that contain no file other
-  than `.yaml` (empty/incomplete experiments).
-- `detect_and_track.py` deletes the entire `split_dir` (`shutil.rmtree`) as
-  soon as a new identified detection is written. Existing splits are therefore
-  invalidated.
-- `train_classifier.py` deletes `val_pred_early_stop.csv` before starting a new
-  training execution.
-- With `RERUN_SOME_DETECT = True`, crops that can newly be matched are moved
-  (renamed, not deleted) from `unidentified/` to the identified folder.
-
-No script deletes non-empty result version folders, source videos, crop images
-outside the `unidentified` move, or `all_experiments.csv` rows.
 
 ---
 
-## 6. Practical notes and limitations
-
-- `--dry-run` is parsed but currently ignored.
-- With `FINETUNE = False` the training metrics (`train_acc`, `val_acc`, ...) of
-  `runs_summary.csv` refer to the classification head only; the backbone weights
-  are never saved, so `cosine_similarity.py` uses the pretrained backbone.
-- `ASSYMETRY = False` merges left/right ears into a single label. Set it to
-  `True` if left and right ears must be treated as different classes.
-- Detection labels must contain `detect` or `seg` so that the YOLO processing
-  mode can be inferred.
+## 6. Practical notes
 - New detection models can be added by placing a compatible `.pt` file in
-  `models/` and adding its key, confidence and labels to `DETECT_PARAMS` in
+  `<models_dir>` and adding its key, confidence and labels to `DETECT_PARAMS` in
   `pipeline.py`. Other model families require a new `process_video_*` function
   and an entry in the processing-mode dispatch.
 - Filter scripts must be stored in
